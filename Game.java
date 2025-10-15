@@ -34,6 +34,7 @@ public class Game extends JPanel implements Runnable {
     private static final int PARTICLES_MIN = 6;
     private static final int PARTICLES_MAX = 10;
 
+  
     private static final Color COLOR_BG = new Color(0x0D0F14);
     private static final Color COLOR_FLOOR = new Color(0x171A21);
     private static final Color COLOR_WALL = new Color(0x2B2F3A);
