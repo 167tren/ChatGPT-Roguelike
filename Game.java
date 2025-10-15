@@ -34,7 +34,12 @@ public class Game extends JPanel implements Runnable {
     private static final int PARTICLES_MIN = 6;
     private static final int PARTICLES_MAX = 10;
 
-  
+    private static final int MAX_ROOMS = 14;
+    private static final int ROOM_MIN = 4;
+    private static final int ROOM_MAX = 9;
+    private static final int ROOM_ATTEMPTS = 60;
+    private static final long DEMO_SEED = 123456789L;
+
     private static final Color COLOR_BG = new Color(0x0D0F14);
     private static final Color COLOR_FLOOR = new Color(0x171A21);
     private static final Color COLOR_WALL = new Color(0x2B2F3A);
@@ -47,7 +52,42 @@ public class Game extends JPanel implements Runnable {
     private static final int PANEL_WIDTH = GRID_WIDTH * TILE_SIZE;
     private static final int PANEL_HEIGHT = GRID_HEIGHT * TILE_SIZE + HUD_HEIGHT;
 
+    private static final int DECAL_NONE = -1;
+    private static final int DECAL_PLUS = 0;
+    private static final int DECAL_LINE = 1;
+    private static final int DECAL_DOT = 2;
+
     private enum Tile { WALL, FLOOR }
+
+    private static class Rect {
+        final int x;
+        final int y;
+        final int w;
+        final int h;
+
+        Rect(int x, int y, int w, int h) {
+            this.x = x;
+            this.y = y;
+            this.w = w;
+            this.h = h;
+        }
+
+        Rect expanded(int padding) {
+            return new Rect(x - padding, y - padding, w + padding * 2, h + padding * 2);
+        }
+
+        boolean intersects(Rect other) {
+            return x < other.x + other.w && x + w > other.x && y < other.y + other.h && y + h > other.y;
+        }
+
+        int centerX() {
+            return x + w / 2;
+        }
+
+        int centerY() {
+            return y + h / 2;
+        }
+    }
 
     private static class Entity {
         int tileX;
@@ -76,10 +116,13 @@ public class Game extends JPanel implements Runnable {
 
     private final Tile[][] map = new Tile[GRID_WIDTH][GRID_HEIGHT];
     private final float[][] floorShade = new float[GRID_WIDTH][GRID_HEIGHT];
+    private final int[][] floorDecals = new int[GRID_WIDTH][GRID_HEIGHT];
+    private final List<Rect> rooms = new ArrayList<>();
     private final Entity player = new Entity();
     private final List<Particle> particles = new ArrayList<>();
-    private final Random rng = new Random(1337);
+    private final Random rng = new Random();
 
+    private long currentSeed;
     private boolean running;
 
     public Game() {
@@ -88,33 +131,138 @@ public class Game extends JPanel implements Runnable {
         setDoubleBuffered(true);
         setBackground(COLOR_BG);
 
-        initMap();
-        initPlayer();
+        setSeed(System.nanoTime());
+        generateDungeon();
         initInput();
     }
 
-    private void initMap() {
+    private void setSeed(long seed) {
+        currentSeed = seed;
+    }
+
+    private void generateDungeon() {
+        rng.setSeed(currentSeed);
+        rooms.clear();
+        particles.clear();
+        player.moving = false;
+        player.moveTime = 0f;
+
         for (int x = 0; x < GRID_WIDTH; x++) {
             for (int y = 0; y < GRID_HEIGHT; y++) {
-                if (x == 0 || y == 0 || x == GRID_WIDTH - 1 || y == GRID_HEIGHT - 1) {
-                    map[x][y] = Tile.WALL;
-                } else {
-                    map[x][y] = Tile.FLOOR;
+                map[x][y] = Tile.WALL;
+                floorShade[x][y] = 1f;
+                floorDecals[x][y] = DECAL_NONE;
+            }
+        }
+
+        int attempts = 0;
+        while (rooms.size() < MAX_ROOMS && attempts < ROOM_ATTEMPTS) {
+            attempts++;
+            int w = ROOM_MIN + rng.nextInt(ROOM_MAX - ROOM_MIN + 1);
+            int h = ROOM_MIN + rng.nextInt(ROOM_MAX - ROOM_MIN + 1);
+            if (w >= GRID_WIDTH - 2 || h >= GRID_HEIGHT - 2) {
+                continue;
+            }
+            int x = 1 + rng.nextInt(Math.max(1, GRID_WIDTH - w - 1));
+            int y = 1 + rng.nextInt(Math.max(1, GRID_HEIGHT - h - 1));
+            Rect room = new Rect(x, y, w, h);
+
+            boolean overlaps = false;
+            for (Rect other : rooms) {
+                if (room.expanded(1).intersects(other)) {
+                    overlaps = true;
+                    break;
                 }
-                floorShade[x][y] = 0.92f + rng.nextFloat() * 0.16f;
+            }
+            if (overlaps) {
+                continue;
+            }
+
+            carveRoom(room);
+            if (!rooms.isEmpty()) {
+                Rect previous = rooms.get(rooms.size() - 1);
+                carveCorridor(previous, room);
+            }
+            rooms.add(room);
+        }
+
+        if (rooms.isEmpty()) {
+            int w = ROOM_MIN + 2;
+            int h = ROOM_MIN + 2;
+            int x = GRID_WIDTH / 2 - w / 2;
+            int y = GRID_HEIGHT / 2 - h / 2;
+            Rect fallback = new Rect(x, y, w, h);
+            carveRoom(fallback);
+            rooms.add(fallback);
+        }
+
+        Rect start = rooms.get(0);
+        placePlayer(start.centerX(), start.centerY());
+    }
+
+    private void carveRoom(Rect room) {
+        for (int x = room.x; x < room.x + room.w; x++) {
+            for (int y = room.y; y < room.y + room.h; y++) {
+                carveFloor(x, y);
             }
         }
     }
 
-    private void initPlayer() {
-        player.tileX = GRID_WIDTH / 2;
-        player.tileY = GRID_HEIGHT / 2;
-        player.renderX = player.tileX;
-        player.renderY = player.tileY;
-        player.startX = player.tileX;
-        player.startY = player.tileY;
-        player.targetX = player.tileX;
-        player.targetY = player.tileY;
+    private void carveCorridor(Rect from, Rect to) {
+        int x1 = from.centerX();
+        int y1 = from.centerY();
+        int x2 = to.centerX();
+        int y2 = to.centerY();
+        boolean horizontalFirst = rng.nextBoolean();
+        if (horizontalFirst) {
+            carveHorizontalCorridor(x1, x2, y1);
+            carveVerticalCorridor(y1, y2, x2);
+        } else {
+            carveVerticalCorridor(y1, y2, x1);
+            carveHorizontalCorridor(x1, x2, y2);
+        }
+    }
+
+    private void carveHorizontalCorridor(int x1, int x2, int y) {
+        int start = Math.min(x1, x2);
+        int end = Math.max(x1, x2);
+        for (int x = start; x <= end; x++) {
+            carveFloor(x, y);
+        }
+    }
+
+    private void carveVerticalCorridor(int y1, int y2, int x) {
+        int start = Math.min(y1, y2);
+        int end = Math.max(y1, y2);
+        for (int y = start; y <= end; y++) {
+            carveFloor(x, y);
+        }
+    }
+
+    private void carveFloor(int x, int y) {
+        if (!inBounds(x, y)) return;
+        map[x][y] = Tile.FLOOR;
+        floorShade[x][y] = 0.9f + rng.nextFloat() * 0.18f;
+        if (rng.nextFloat() < 0.08f) {
+            floorDecals[x][y] = rng.nextInt(3);
+        } else {
+            floorDecals[x][y] = DECAL_NONE;
+        }
+    }
+
+    private boolean inBounds(int x, int y) {
+        return x >= 0 && y >= 0 && x < GRID_WIDTH && y < GRID_HEIGHT;
+    }
+
+    private void placePlayer(int tileX, int tileY) {
+        player.tileX = tileX;
+        player.tileY = tileY;
+        player.renderX = tileX;
+        player.renderY = tileY;
+        player.startX = tileX;
+        player.startY = tileY;
+        player.targetX = tileX;
+        player.targetY = tileY;
         player.moving = false;
         player.moveTime = 0f;
     }
@@ -127,11 +275,6 @@ public class Game extends JPanel implements Runnable {
                     e.consume();
                 }
             }
-
-            @Override
-            public void keyReleased(KeyEvent e) {
-                // No-op, but helps consume key events on release if needed.
-            }
         };
         addKeyListener(adapter);
     }
@@ -139,6 +282,21 @@ public class Game extends JPanel implements Runnable {
     private boolean handleKey(int keyCode) {
         if (keyCode == KeyEvent.VK_Q) {
             System.exit(0);
+            return true;
+        }
+        if (keyCode == KeyEvent.VK_N) {
+            setSeed(System.nanoTime());
+            generateDungeon();
+            return true;
+        }
+        if (keyCode == KeyEvent.VK_F5) {
+            generateDungeon();
+            return true;
+        }
+        // Use 'R' (not 'S') for reseed to avoid conflict with Down/WASD-S.
+        if (keyCode == KeyEvent.VK_R) {
+            setSeed(DEMO_SEED);
+            generateDungeon();
             return true;
         }
         if (player.moving) {
@@ -185,10 +343,7 @@ public class Game extends JPanel implements Runnable {
     }
 
     private boolean isWalkable(int x, int y) {
-        if (x < 0 || y < 0 || x >= GRID_WIDTH || y >= GRID_HEIGHT) {
-            return false;
-        }
-        return map[x][y] == Tile.FLOOR;
+        return inBounds(x, y) && map[x][y] == Tile.FLOOR;
     }
 
     private void spawnStepParticles(int tileX, int tileY) {
@@ -232,7 +387,7 @@ public class Game extends JPanel implements Runnable {
             long now = System.nanoTime();
             double elapsed = now - lastTime;
             if (elapsed > 250_000_000.0) {
-                elapsed = 250_000_000.0; // Clamp to avoid spiral of death.
+                elapsed = 250_000_000.0; // clamp
             }
             lastTime = now;
             accumulator += elapsed;
@@ -248,7 +403,7 @@ public class Game extends JPanel implements Runnable {
                 repaint();
             }
 
-            long sleepTime = (long) ((frameDuration - accumulator) / 1_000_000.0);
+            long sleepTime = (long) Math.max(0, (frameDuration - accumulator) / 1_000_000.0);
             if (sleepTime > 0) {
                 try {
                     Thread.sleep(sleepTime);
@@ -289,7 +444,7 @@ public class Game extends JPanel implements Runnable {
             p.life += dt;
             p.x += p.vx * dt;
             p.y += p.vy * dt;
-            p.vy += -8f * dt;
+            p.vy += -200f * dt; // gravity
             if (p.life >= p.maxLife) {
                 particles.remove(i);
             }
@@ -339,16 +494,41 @@ public class Game extends JPanel implements Runnable {
         g2.setColor(base);
         g2.fillRect(px, py, TILE_SIZE, TILE_SIZE);
 
-        Random tileRandom = new Random(x * 341873128712L ^ y * 132897987541L);
-        for (int i = 0; i < 4; i++) {
+        Random tileRandom = new Random(tileHash(currentSeed, x, y));
+        for (int i = 0; i < 5; i++) {
             float dotX = px + tileRandom.nextFloat() * TILE_SIZE;
             float dotY = py + tileRandom.nextFloat() * TILE_SIZE;
-            float alpha = 0.08f + tileRandom.nextFloat() * 0.05f;
-            Color dotColor = tileRandom.nextBoolean()
-                    ? new Color(255, 255, 255, (int) (alpha * 255))
+            float alpha = 0.05f + tileRandom.nextFloat() * 0.05f;
+            boolean light = tileRandom.nextBoolean();
+            Color dotColor = light ? new Color(255, 255, 255, (int) (alpha * 255))
                     : new Color(0, 0, 0, (int) (alpha * 255));
             g2.setColor(dotColor);
-            g2.fillRect((int) dotX, (int) dotY, 1, 1);
+            g2.fillRect(Math.round(dotX), Math.round(dotY), 1, 1);
+        }
+
+        int decal = floorDecals[x][y];
+        if (decal != DECAL_NONE) {
+            CompositeState state = new CompositeState(g2);
+            g2.setComposite(AlphaComposite.SrcOver.derive(0.12f));
+            g2.setColor(new Color(0x6B7285));
+            int cx = px + TILE_SIZE / 2;
+            int cy = py + TILE_SIZE / 2;
+            switch (decal) {
+                case DECAL_PLUS:
+                    g2.fillRect(cx - 1, py + TILE_SIZE / 4, 2, TILE_SIZE / 2);
+                    g2.fillRect(px + TILE_SIZE / 4, cy - 1, TILE_SIZE / 2, 2);
+                    break;
+                case DECAL_LINE:
+                    g2.setStroke(new BasicStroke(1f));
+                    g2.drawLine(px + TILE_SIZE / 4, py + TILE_SIZE / 4, px + TILE_SIZE * 3 / 4, py + TILE_SIZE * 3 / 4);
+                    break;
+                case DECAL_DOT:
+                    g2.fillOval(cx - 2, cy - 2, 4, 4);
+                    break;
+                default:
+                    break;
+            }
+            state.restore();
         }
     }
 
@@ -371,15 +551,14 @@ public class Game extends JPanel implements Runnable {
     private void drawParticles(Graphics2D g2) {
         for (Particle p : particles) {
             float alpha = 1f - (p.life / p.maxLife);
-            if (alpha <= 0f) {
-                continue;
-            }
+            if (alpha <= 0f) continue;
             alpha = Math.max(0f, Math.min(1f, alpha));
             CompositeState state = new CompositeState(g2);
             g2.setComposite(AlphaComposite.SrcOver.derive(alpha * 0.8f));
             g2.setColor(COLOR_PARTICLE);
             float size = p.radius * (0.5f + alpha * 0.5f);
-            g2.fillOval(Math.round(p.x - size / 2f), Math.round(p.y - size / 2f), Math.round(size), Math.round(size));
+            g2.fillOval(Math.round(p.x - size / 2f), Math.round(p.y - size / 2f),
+                        Math.round(size), Math.round(size));
             state.restore();
         }
     }
@@ -428,8 +607,7 @@ public class Game extends JPanel implements Runnable {
         g2.setColor(new Color(0x141820));
         g2.fillRoundRect(0, 0, width, HUD_HEIGHT, 16, 16);
 
-        GradientPaint strip = new GradientPaint(0, 0, lightenColor(new Color(0x141820), 0.15f), 0, 16,
-                new Color(0x141820));
+        GradientPaint strip = new GradientPaint(0, 0, lightenColor(new Color(0x141820), 0.15f), 0, 16, new Color(0x141820));
         PaintState paintState = new PaintState(g2);
         g2.setPaint(strip);
         g2.fillRoundRect(0, 0, width, 18, 16, 16);
@@ -438,23 +616,47 @@ public class Game extends JPanel implements Runnable {
         int padding = 20;
         int pillHeight = 32;
         int pillArc = 20;
-        Font font = getFont().deriveFont(Font.BOLD, 16f);
-        g2.setFont(font);
-        FontMetrics fm = g2.getFontMetrics();
+        Font pillFont = getFont().deriveFont(Font.BOLD, 16f);
+        g2.setFont(pillFont);
+        FontMetrics pillMetrics = g2.getFontMetrics();
 
-        int x = padding;
-        x = drawHudPill(g2, x, 16, pillHeight, pillArc, "HP 100/100", COLOR_ACCENT, COLOR_TEXT_PRIMARY, fm);
-        x += 12;
-        x = drawHudPill(g2, x, 16, pillHeight, pillArc, "Stage 1", new Color(0x1F232D), COLOR_TEXT_SECONDARY, fm);
-        x += 12;
-        drawHudPill(g2, x, 16, pillHeight, pillArc, "Move: WASD / Arrows   •   Quit: Q", new Color(0x1A1E27),
-                COLOR_TEXT_SECONDARY, fm);
+        String hpText = "HP 100/100";
+        String stageText = "Stage 2 — Procedural Dungeon";
+        String seedText = "Seed: " + currentSeed;
+
+        int hpWidth = pillWidth(pillMetrics, hpText);
+        int stageWidth = pillWidth(pillMetrics, stageText);
+        int seedWidth = pillWidth(pillMetrics, seedText);
+
+        int hpX = padding;
+        int stageX = Math.max(padding, (width - stageWidth) / 2);
+        int seedX = width - padding - seedWidth;
+        if (stageX < hpX + hpWidth + 8) {
+            stageX = hpX + hpWidth + 8;
+        }
+        if (seedX < stageX + stageWidth + 8) {
+            seedX = stageX + stageWidth + 8;
+        }
+
+        drawHudPill(g2, hpX, 16, hpWidth, pillHeight, pillArc, hpText, COLOR_ACCENT, COLOR_TEXT_PRIMARY, pillMetrics);
+        drawHudPill(g2, stageX, 16, stageWidth, pillHeight, pillArc, stageText, new Color(0x1F232D), COLOR_TEXT_SECONDARY, pillMetrics);
+        drawHudPill(g2, seedX, 16, seedWidth, pillHeight, pillArc, seedText, new Color(0x1A1E27), COLOR_TEXT_SECONDARY, pillMetrics);
+
+        Font controlsFont = getFont().deriveFont(Font.PLAIN, 13f);
+        g2.setFont(controlsFont);
+        g2.setColor(COLOR_TEXT_SECONDARY);
+        String controls = "Move: WASD/Arrows   •   Reroll: N   •   Demo Seed: R   •   Reload: F5   •   Quit: Q";
+        FontMetrics controlsMetrics = g2.getFontMetrics();
+        int controlsY = HUD_HEIGHT - 14;
+        g2.drawString(controls, (width - controlsMetrics.stringWidth(controls)) / 2, controlsY);
     }
 
-    private int drawHudPill(Graphics2D g2, int x, int y, int height, int arc, String text, Color background,
-            Color textColor, FontMetrics fm) {
-        int textWidth = fm.stringWidth(text);
-        int width = textWidth + 32;
+    private int pillWidth(FontMetrics fm, String text) {
+        return fm.stringWidth(text) + 32;
+    }
+
+    private void drawHudPill(Graphics2D g2, int x, int y, int width, int height, int arc, String text, Color background,
+                             Color textColor, FontMetrics fm) {
         CompositeState state = new CompositeState(g2);
         g2.setComposite(AlphaComposite.SrcOver.derive(0.3f));
         g2.setColor(Color.BLACK);
@@ -466,7 +668,6 @@ public class Game extends JPanel implements Runnable {
         g2.setColor(textColor);
         int textY = y + (height - fm.getHeight()) / 2 + fm.getAscent();
         g2.drawString(text, x + 16, textY);
-        return x + width;
     }
 
     private void drawVignette(Graphics2D g2) {
@@ -475,8 +676,7 @@ public class Game extends JPanel implements Runnable {
         float radius = Math.max(width, height);
         float[] dist = { 0f, 1f };
         Color[] colors = { new Color(0, 0, 0, 0), new Color(0, 0, 0, 200) };
-        RadialGradientPaint paint = new RadialGradientPaint(new Point2D.Float(width / 2f, height / 2f), radius,
-                dist, colors);
+        RadialGradientPaint paint = new RadialGradientPaint(new Point2D.Float(width / 2f, height / 2f), radius, dist, colors);
         PaintState paintState = new PaintState(g2);
         CompositeState compositeState = new CompositeState(g2);
         g2.setPaint(paint);
@@ -484,6 +684,14 @@ public class Game extends JPanel implements Runnable {
         g2.fillRect(0, 0, width, height);
         compositeState.restore();
         paintState.restore();
+    }
+
+    private long tileHash(long seed, int x, int y) {
+        long h = seed;
+        h ^= (long) x * 341873128712L;
+        h ^= (long) y * 132897987541L;
+        h *= 1099511628211L;
+        return h;
     }
 
     private static Color scaleColor(Color base, float factor) {
@@ -548,7 +756,7 @@ public class Game extends JPanel implements Runnable {
 
     public static void main(String[] args) {
         SwingUtilities.invokeLater(() -> {
-            JFrame frame = new JFrame("Roguelike — Stage 1 (Java 2D, Visual)");
+            JFrame frame = new JFrame("Roguelike — Stage 2 (Java 2D, Visual Dungeon)");
             Game game = new Game();
             frame.setDefaultCloseOperation(JFrame.EXIT_ON_CLOSE);
             frame.setResizable(false);
