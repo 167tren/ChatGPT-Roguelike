@@ -15,7 +15,9 @@ import java.awt.event.KeyAdapter;
 import java.awt.event.KeyEvent;
 import java.awt.geom.Point2D;
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Random;
 
 import javax.swing.JFrame;
@@ -34,12 +36,23 @@ public class Game extends JPanel implements Runnable, CombatManager.Listener, Co
     private final List<Enemy> enemies = dungeon.getEnemies();
     private final List<Particle> particles = new ArrayList<>();
     private final List<Particle> combatParticles = new ArrayList<>();
+    private final List<Relic> relics = new ArrayList<>();
+    private final List<Relic> recentRelics = new ArrayList<>();
     private CombatManager combatManager;
 
     private long currentSeed;
     private boolean running;
     private GameMode mode = GameMode.DUNGEON;
     private Enemy pendingCombatEnemy;
+    private int shards;
+    private int floor = 1;
+    private Sanctuary sanctuary;
+    private Stairs stairs;
+    private boolean showShopOverlay;
+    private boolean showRelicOverlay;
+    private float relicToastTimer;
+    private String shopMessage = "";
+    private float shopMessageTimer;
 
     public Game() {
         setPreferredSize(new Dimension(GameConfig.PANEL_WIDTH, GameConfig.PANEL_HEIGHT));
@@ -59,6 +72,15 @@ public class Game extends JPanel implements Runnable, CombatManager.Listener, Co
 
     private void restartGame() {
         player.hp = player.maxHp;
+        relics.clear();
+        recentRelics.clear();
+        relicToastTimer = 0f;
+        shards = 0;
+        floor = 1;
+        showShopOverlay = false;
+        showRelicOverlay = false;
+        shopMessage = "";
+        shopMessageTimer = 0f;
         setSeed(System.nanoTime());
         generateDungeon();
     }
@@ -70,12 +92,17 @@ public class Game extends JPanel implements Runnable, CombatManager.Listener, Co
         pendingCombatEnemy = null;
         mode = GameMode.DUNGEON;
         player.hp = Math.min(player.hp, player.maxHp);
-
-        dungeon.generate(currentSeed, player);
+        showShopOverlay = false;
+        showRelicOverlay = false;
+        shopMessage = "";
+        shopMessageTimer = 0f;
+        dungeon.generate(currentSeed, player, floor);
+        sanctuary = dungeon.getSanctuary();
+        stairs = dungeon.getStairs();
     }
 
     private void beginCombat(Enemy enemy) {
-        combatManager.beginCombat(enemy);
+        combatManager.beginCombat(enemy, relics, shards, floor);
         mode = GameMode.COMBAT;
     }
 
@@ -83,7 +110,7 @@ public class Game extends JPanel implements Runnable, CombatManager.Listener, Co
         KeyAdapter adapter = new KeyAdapter() {
             @Override
             public void keyPressed(KeyEvent e) {
-                if (handleKey(e.getKeyCode())) {
+                if (handleKey(e)) {
                     e.consume();
                 }
             }
@@ -91,31 +118,41 @@ public class Game extends JPanel implements Runnable, CombatManager.Listener, Co
         addKeyListener(adapter);
     }
 
-    private boolean handleKey(int keyCode) {
+    private boolean handleKey(KeyEvent event) {
+        int keyCode = event.getKeyCode();
         if (keyCode == KeyEvent.VK_Q) {
             System.exit(0);
             return true;
         }
         switch (mode) {
             case GAME_OVER:
-                return handleGameOverKey(keyCode);
+                return handleGameOverKey(event);
             case COMBAT:
-                return handleCombatKey(keyCode);
+                return handleCombatKey(event);
             case DUNGEON:
             default:
-                return handleDungeonKey(keyCode);
+                return handleDungeonKey(event);
         }
     }
 
-    private boolean handleGameOverKey(int keyCode) {
-        if (keyCode == KeyEvent.VK_R) {
+    private boolean handleGameOverKey(KeyEvent event) {
+        if (event.getKeyCode() == KeyEvent.VK_R) {
             restartGame();
             return true;
         }
         return false;
     }
 
-    private boolean handleDungeonKey(int keyCode) {
+    private boolean handleDungeonKey(KeyEvent event) {
+        int keyCode = event.getKeyCode();
+        if (keyCode == KeyEvent.VK_ESCAPE) {
+            if (showShopOverlay || showRelicOverlay) {
+                showShopOverlay = false;
+                showRelicOverlay = false;
+                return true;
+            }
+            return false;
+        }
         if (keyCode == KeyEvent.VK_N) {
             setSeed(System.nanoTime());
             generateDungeon();
@@ -125,10 +162,44 @@ public class Game extends JPanel implements Runnable, CombatManager.Listener, Co
             generateDungeon();
             return true;
         }
-        if (keyCode == KeyEvent.VK_S) {
+        if (keyCode == KeyEvent.VK_S && event.isControlDown()) {
             setSeed(GameConfig.DEMO_SEED);
             generateDungeon();
             return true;
+        }
+        if (keyCode == KeyEvent.VK_R) {
+            showRelicOverlay = !showRelicOverlay;
+            if (showRelicOverlay) {
+                showShopOverlay = false;
+            }
+            return true;
+        }
+        if (showShopOverlay) {
+            if (keyCode == KeyEvent.VK_1 || keyCode == KeyEvent.VK_NUMPAD1) {
+                purchaseRelicFromShop();
+                return true;
+            }
+            if (keyCode == KeyEvent.VK_2 || keyCode == KeyEvent.VK_NUMPAD2) {
+                purchaseHealFromShop();
+                return true;
+            }
+        }
+        if (keyCode == KeyEvent.VK_E) {
+            if (showShopOverlay) {
+                showShopOverlay = false;
+                return true;
+            }
+            if (dungeon.isSanctuaryTile(player.tileX, player.tileY)) {
+                showShopOverlay = !showShopOverlay;
+                if (showShopOverlay) {
+                    showRelicOverlay = false;
+                }
+                return true;
+            }
+            if (dungeon.isStairsTile(player.tileX, player.tileY)) {
+                descendFloor();
+                return true;
+            }
         }
         if (player.moving) {
             return false;
@@ -151,7 +222,8 @@ public class Game extends JPanel implements Runnable, CombatManager.Listener, Co
         }
     }
 
-    private boolean handleCombatKey(int keyCode) {
+    private boolean handleCombatKey(KeyEvent event) {
+        int keyCode = event.getKeyCode();
         if (!combatManager.isActive()) {
             return false;
         }
@@ -180,6 +252,10 @@ public class Game extends JPanel implements Runnable, CombatManager.Listener, Co
         player.moveTime = 0f;
         player.moving = true;
 
+        if (!dungeon.isSanctuaryTile(newX, newY)) {
+            showShopOverlay = false;
+        }
+
         spawnStepParticles(fromX, fromY);
 
         Enemy encountered = dungeon.getEnemyAt(newX, newY);
@@ -187,6 +263,53 @@ public class Game extends JPanel implements Runnable, CombatManager.Listener, Co
             pendingCombatEnemy = encountered;
         }
         return true;
+    }
+
+    private void purchaseRelicFromShop() {
+        if (shards < GameConfig.COST_RELIC) {
+            shopMessage = "Need more shards";
+            shopMessageTimer = 2f;
+            return;
+        }
+        shards -= GameConfig.COST_RELIC;
+        Relic relic = RelicCatalog.random(rng);
+        relics.add(relic);
+        recentRelics.clear();
+        recentRelics.add(relic);
+        relicToastTimer = 3.5f;
+        shopMessage = "Bought " + relic.name;
+        shopMessageTimer = 2.5f;
+    }
+
+    private void purchaseHealFromShop() {
+        if (shards < GameConfig.COST_HEAL) {
+            shopMessage = "Need more shards";
+            shopMessageTimer = 2f;
+            return;
+        }
+        if (player.hp >= player.maxHp) {
+            shopMessage = "HP already full";
+            shopMessageTimer = 2f;
+            return;
+        }
+        shards -= GameConfig.COST_HEAL;
+        int before = player.hp;
+        player.hp = Math.min(player.maxHp, player.hp + GameConfig.SHOP_HEAL_AMOUNT);
+        int healed = player.hp - before;
+        shopMessage = "Healed +" + healed;
+        shopMessageTimer = 2f;
+    }
+
+    private void descendFloor() {
+        floor++;
+        showShopOverlay = false;
+        showRelicOverlay = false;
+        shopMessage = "";
+        shopMessageTimer = 0f;
+        recentRelics.clear();
+        relicToastTimer = 0f;
+        setSeed(System.nanoTime());
+        generateDungeon();
     }
 
     private boolean isWalkable(int x, int y) {
@@ -276,6 +399,18 @@ public class Game extends JPanel implements Runnable, CombatManager.Listener, Co
                 break;
         }
         updateParticles(dt);
+        if (relicToastTimer > 0f) {
+            relicToastTimer = Math.max(0f, relicToastTimer - dt);
+            if (relicToastTimer == 0f) {
+                recentRelics.clear();
+            }
+        }
+        if (shopMessageTimer > 0f) {
+            shopMessageTimer = Math.max(0f, shopMessageTimer - dt);
+            if (shopMessageTimer == 0f) {
+                shopMessage = "";
+            }
+        }
     }
 
     private void updatePlayer(float dt) {
@@ -309,13 +444,22 @@ public class Game extends JPanel implements Runnable, CombatManager.Listener, Co
     }
 
     @Override
-    public void onVictory(Enemy enemy) {
+    public void onVictory(Enemy enemy, CombatManager.VictoryReward reward) {
         dungeon.removeEnemy(enemy);
+        if (reward != null) {
+            shards += Math.max(0, reward.shardsEarned);
+            if (reward.newRelics != null && !reward.newRelics.isEmpty()) {
+                recentRelics.clear();
+                recentRelics.addAll(reward.newRelics);
+                relicToastTimer = 3.5f;
+            }
+        }
         player.hp = Math.min(player.maxHp, player.hp + 10);
         combatParticles.clear();
         combatManager.clear();
         mode = GameMode.DUNGEON;
         pendingCombatEnemy = null;
+        showShopOverlay = false;
     }
 
     @Override
@@ -324,6 +468,8 @@ public class Game extends JPanel implements Runnable, CombatManager.Listener, Co
         combatManager.clear();
         mode = GameMode.GAME_OVER;
         pendingCombatEnemy = null;
+        showShopOverlay = false;
+        showRelicOverlay = false;
     }
 
     @Override
@@ -438,6 +584,15 @@ public class Game extends JPanel implements Runnable, CombatManager.Listener, Co
         if (mode == GameMode.COMBAT) {
             drawCombatOverlay(g2);
         }
+        if (mode == GameMode.DUNGEON && showShopOverlay) {
+            drawShopOverlay(g2);
+        }
+        if (mode == GameMode.DUNGEON && showRelicOverlay) {
+            drawRelicOverlay(g2);
+        }
+        if (relicToastTimer > 0f && !recentRelics.isEmpty()) {
+            drawRelicToast(g2);
+        }
         if (mode == GameMode.GAME_OVER) {
             drawGameOverOverlay(g2);
         }
@@ -503,6 +658,12 @@ public class Game extends JPanel implements Runnable, CombatManager.Listener, Co
             }
             state.restore();
         }
+
+        if (dungeon.isSanctuaryTile(x, y)) {
+            drawSanctuaryMarker(g2, px, py);
+        } else if (dungeon.isStairsTile(x, y)) {
+            drawStairsMarker(g2, px, py);
+        }
     }
 
     private void drawWallTile(Graphics2D g2, int x, int y) {
@@ -519,6 +680,46 @@ public class Game extends JPanel implements Runnable, CombatManager.Listener, Co
         g2.setColor(darkEdge);
         g2.fillRect(px, py + GameConfig.TILE_SIZE - 1, GameConfig.TILE_SIZE, 1);
         g2.fillRect(px + GameConfig.TILE_SIZE - 1, py, 1, GameConfig.TILE_SIZE);
+    }
+
+    private void drawSanctuaryMarker(Graphics2D g2, int px, int py) {
+        int size = Math.round(GameConfig.TILE_SIZE * 0.6f);
+        int sx = px + (GameConfig.TILE_SIZE - size) / 2;
+        int sy = py + (GameConfig.TILE_SIZE - size) / 2;
+        CompositeState state = new CompositeState(g2);
+        g2.setComposite(AlphaComposite.SrcOver.derive(0.6f));
+        g2.setColor(GameConfig.COLOR_SANCTUARY);
+        g2.fillRoundRect(sx, sy, size, size, size / 2, size / 2);
+        state.restore();
+
+        g2.setColor(new Color(255, 255, 255, 140));
+        g2.setStroke(new BasicStroke(1.2f));
+        g2.drawRoundRect(sx, sy, size, size, size / 2, size / 2);
+
+        g2.setStroke(new BasicStroke(1.5f));
+        g2.drawLine(sx + size / 2, sy + size / 4, sx + size / 2, sy + size * 3 / 4);
+        g2.drawLine(sx + size / 4, sy + size / 2, sx + size * 3 / 4, sy + size / 2);
+        g2.setStroke(new BasicStroke(1f));
+    }
+
+    private void drawStairsMarker(Graphics2D g2, int px, int py) {
+        int size = Math.round(GameConfig.TILE_SIZE * 0.7f);
+        int sx = px + (GameConfig.TILE_SIZE - size) / 2;
+        int sy = py + (GameConfig.TILE_SIZE - size) / 2;
+        CompositeState state = new CompositeState(g2);
+        g2.setComposite(AlphaComposite.SrcOver.derive(0.55f));
+        g2.setColor(GameConfig.COLOR_STAIRS);
+        g2.fillRoundRect(sx, sy, size, size, 14, 14);
+        state.restore();
+
+        g2.setColor(new Color(255, 255, 255, 120));
+        g2.setStroke(new BasicStroke(1.2f));
+        int steps = 3;
+        for (int i = 0; i < steps; i++) {
+            int stepY = sy + 6 + i * (size / steps);
+            g2.drawLine(sx + 6, stepY, sx + size - 6, stepY + 4);
+        }
+        g2.setStroke(new BasicStroke(1f));
     }
 
     private void drawParticles(Graphics2D g2) {
@@ -552,6 +753,168 @@ public class Game extends JPanel implements Runnable, CombatManager.Listener, Co
         }
     }
 
+    private void drawShopOverlay(Graphics2D g2) {
+        int width = Math.min(360, getWidth() - 40);
+        int height = 200;
+        int x = (getWidth() - width) / 2;
+        int y = GameConfig.HUD_HEIGHT + (getHeight() - GameConfig.HUD_HEIGHT - height) / 2;
+
+        CompositeState dim = new CompositeState(g2);
+        g2.setComposite(AlphaComposite.SrcOver.derive(0.55f));
+        g2.setColor(new Color(8, 10, 16, 200));
+        g2.fillRoundRect(x - 12, y - 12, width + 24, height + 24, 24, 24);
+        dim.restore();
+
+        g2.setColor(new Color(0x171C26));
+        g2.fillRoundRect(x, y, width, height, 20, 20);
+        g2.setColor(new Color(255, 255, 255, 40));
+        g2.setStroke(new BasicStroke(1.6f));
+        g2.drawRoundRect(x, y, width, height, 20, 20);
+
+        Font titleFont = getFont().deriveFont(Font.BOLD, 20f);
+        g2.setFont(titleFont);
+        g2.setColor(GameConfig.COLOR_TEXT_PRIMARY);
+        g2.drawString("Sanctuary", x + 24, y + 34);
+
+        Font infoFont = getFont().deriveFont(Font.PLAIN, 14f);
+        g2.setFont(infoFont);
+        FontMetrics infoMetrics = g2.getFontMetrics();
+        String shardLine = "Shards: " + shards;
+        g2.setColor(GameConfig.COLOR_TEXT_SECONDARY);
+        g2.drawString(shardLine, x + width - 24 - infoMetrics.stringWidth(shardLine), y + 34);
+
+        int optionY = y + 72;
+        drawShopOption(g2, x + 24, optionY, "1", "Buy random relic", GameConfig.COST_RELIC,
+                shards >= GameConfig.COST_RELIC);
+        optionY += 48;
+        boolean canHeal = shards >= GameConfig.COST_HEAL && player.hp < player.maxHp;
+        drawShopOption(g2, x + 24, optionY, "2", "Heal " + GameConfig.SHOP_HEAL_AMOUNT + " HP",
+                GameConfig.COST_HEAL, canHeal);
+
+        g2.setFont(infoFont);
+        g2.setColor(GameConfig.COLOR_TEXT_SECONDARY);
+        String closeText = "Press E or Esc to close";
+        g2.drawString(closeText, x + width - 24 - infoMetrics.stringWidth(closeText), y + height - 20);
+
+        if (shopMessageTimer > 0f && shopMessage != null && !shopMessage.isEmpty()) {
+            float alpha = Math.min(1f, shopMessageTimer / 2f);
+            g2.setColor(new Color(255, 255, 255, Math.round(alpha * 220)));
+            g2.drawString(shopMessage, x + 24, y + height - 20);
+        }
+    }
+
+    private void drawShopOption(Graphics2D g2, int x, int y, String key, String label, int cost, boolean available) {
+        Font font = getFont().deriveFont(Font.PLAIN, 14f);
+        g2.setFont(font);
+        String option = "[" + key + "] " + label;
+        String costText = "Cost: " + cost;
+        FontMetrics metrics = g2.getFontMetrics();
+        boolean highlight = available;
+        CompositeState state = new CompositeState(g2);
+        g2.setComposite(AlphaComposite.SrcOver.derive(highlight ? 0.55f : 0.35f));
+        g2.setColor(highlight ? new Color(0x1F2B3C) : new Color(0x151A25));
+        int width = Math.max(180, metrics.stringWidth(option) + metrics.stringWidth(costText) + 48);
+        g2.fillRoundRect(x, y - 18, width, 36, 16, 16);
+        state.restore();
+        g2.setColor(highlight ? GameConfig.COLOR_TEXT_PRIMARY : GameConfig.COLOR_TEXT_SECONDARY);
+        g2.drawString(option, x + 16, y);
+        g2.drawString(costText, x + width - metrics.stringWidth(costText) - 16, y);
+        if (!available) {
+            g2.setColor(new Color(255, 255, 255, 40));
+            g2.drawLine(x + 14, y - 10, x + width - 14, y + 6);
+        }
+    }
+
+    private void drawRelicOverlay(Graphics2D g2) {
+        int width = Math.min(420, getWidth() - 40);
+        int height = Math.min(260, getHeight() - GameConfig.HUD_HEIGHT - 40);
+        int x = (getWidth() - width) / 2;
+        int y = GameConfig.HUD_HEIGHT + (getHeight() - GameConfig.HUD_HEIGHT - height) / 2;
+
+        CompositeState dim = new CompositeState(g2);
+        g2.setComposite(AlphaComposite.SrcOver.derive(0.55f));
+        g2.setColor(new Color(8, 10, 16, 200));
+        g2.fillRoundRect(x - 12, y - 12, width + 24, height + 24, 24, 24);
+        dim.restore();
+
+        g2.setColor(new Color(0x171C26));
+        g2.fillRoundRect(x, y, width, height, 20, 20);
+        g2.setColor(new Color(255, 255, 255, 40));
+        g2.setStroke(new BasicStroke(1.6f));
+        g2.drawRoundRect(x, y, width, height, 20, 20);
+
+        Font titleFont = getFont().deriveFont(Font.BOLD, 20f);
+        g2.setFont(titleFont);
+        g2.setColor(GameConfig.COLOR_TEXT_PRIMARY);
+        g2.drawString("Relics", x + 24, y + 34);
+
+        Font infoFont = getFont().deriveFont(Font.PLAIN, 13f);
+        g2.setFont(infoFont);
+        g2.setColor(GameConfig.COLOR_TEXT_SECONDARY);
+        String hint = "Press R or Esc to close";
+        FontMetrics metrics = g2.getFontMetrics();
+        g2.drawString(hint, x + width - 24 - metrics.stringWidth(hint), y + 34);
+
+        int listY = y + 64;
+        if (relics.isEmpty()) {
+            g2.setColor(GameConfig.COLOR_TEXT_SECONDARY);
+            g2.drawString("No relics collected yet", x + 24, listY);
+            return;
+        }
+
+        Map<String, Integer> counts = new LinkedHashMap<>();
+        Map<String, Relic> unique = new LinkedHashMap<>();
+        for (Relic relic : relics) {
+            counts.merge(relic.id, 1, Integer::sum);
+            unique.putIfAbsent(relic.id, relic);
+        }
+
+        for (Relic relic : unique.values()) {
+            int count = counts.get(relic.id);
+            String name = relic.name + (count > 1 ? " ×" + count : "");
+            g2.setColor(GameConfig.COLOR_TEXT_PRIMARY);
+            g2.setFont(getFont().deriveFont(Font.BOLD, 14f));
+            g2.drawString(name, x + 24, listY);
+            g2.setFont(infoFont);
+            g2.setColor(GameConfig.COLOR_TEXT_SECONDARY);
+            g2.drawString(relic.desc, x + 24, listY + 18);
+            listY += 40;
+            if (listY > y + height - 30) {
+                break;
+            }
+        }
+    }
+
+    private void drawRelicToast(Graphics2D g2) {
+        if (recentRelics.isEmpty()) {
+            return;
+        }
+        StringBuilder sb = new StringBuilder();
+        for (int i = 0; i < recentRelics.size(); i++) {
+            if (i > 0) {
+                sb.append(", ");
+            }
+            sb.append(recentRelics.get(i).name);
+        }
+        String text = (recentRelics.size() > 1 ? "New relics: " : "New relic: ") + sb.toString();
+        Font font = getFont().deriveFont(Font.BOLD, 14f);
+        g2.setFont(font);
+        FontMetrics metrics = g2.getFontMetrics();
+        int width = metrics.stringWidth(text) + 36;
+        int height = 30;
+        int x = (getWidth() - width) / 2;
+        int y = GameConfig.HUD_HEIGHT + 20;
+        float alpha = Math.min(1f, relicToastTimer / 3.5f);
+        CompositeState state = new CompositeState(g2);
+        g2.setComposite(AlphaComposite.SrcOver.derive(alpha * 0.85f));
+        g2.setColor(new Color(20, 24, 34, 220));
+        g2.fillRoundRect(x, y, width, height, 18, 18);
+        state.restore();
+        g2.setColor(GameConfig.COLOR_TEXT_PRIMARY);
+        g2.drawString(text, x + (width - metrics.stringWidth(text)) / 2,
+                y + height / 2 + metrics.getAscent() / 2 - 3);
+    }
+
     private void drawEnemies(Graphics2D g2) {
         CombatState activeCombat = combatManager.getState();
         for (Enemy enemy : enemies) {
@@ -571,21 +934,58 @@ public class Game extends JPanel implements Runnable, CombatManager.Listener, Co
             int bodyX = Math.round(px + GameConfig.TILE_SIZE * 0.25f);
             int bodyY = Math.round(py + GameConfig.TILE_SIZE * 0.2f);
             int bodySize = Math.round(GameConfig.TILE_SIZE * 0.5f);
-            g2.setColor(GameConfig.COLOR_ENEMY);
+            Color base = enemyColor(enemy);
+            g2.setColor(base);
             g2.fillRoundRect(bodyX, bodyY, bodySize, bodySize, bodySize / 3, bodySize / 3);
 
-            GradientPaint gradient = new GradientPaint(bodyX, bodyY, lightenColor(GameConfig.COLOR_ENEMY, 0.25f), bodyX,
-                    bodyY + bodySize, GameConfig.COLOR_ENEMY);
+            GradientPaint gradient = new GradientPaint(bodyX, bodyY, lightenColor(base, 0.3f), bodyX,
+                    bodyY + bodySize, base);
             PaintState paintState = new PaintState(g2);
             g2.setPaint(gradient);
             g2.fillRoundRect(bodyX, bodyY, bodySize, bodySize, bodySize / 3, bodySize / 3);
             paintState.restore();
 
+            if (enemy.elite) {
+                g2.setColor(GameConfig.COLOR_ELITE_OUTLINE);
+                g2.setStroke(new BasicStroke(2.5f));
+                g2.drawRoundRect(bodyX - 2, bodyY - 2, bodySize + 4, bodySize + 4, bodySize / 3, bodySize / 3);
+            }
             if (activeCombat != null && activeCombat.enemy == enemy) {
                 g2.setColor(new Color(255, 255, 255, 120));
                 g2.setStroke(new BasicStroke(2.5f));
                 g2.drawRoundRect(bodyX - 2, bodyY - 2, bodySize + 4, bodySize + 4, bodySize / 3, bodySize / 3);
             }
+            g2.setStroke(new BasicStroke(1f));
+        }
+    }
+
+    private Color enemyColor(Enemy enemy) {
+        if (enemy == null || enemy.type == null) {
+            return GameConfig.COLOR_ENEMY;
+        }
+        switch (enemy.type) {
+            case ARCHER:
+                return new Color(0xFF7A9B);
+            case SLIME:
+                return new Color(0x6FEBA4);
+            case GRUNT:
+            default:
+                return GameConfig.COLOR_ENEMY;
+        }
+    }
+
+    private String enemyTypeName(Enemy enemy) {
+        if (enemy == null || enemy.type == null) {
+            return "Enemy";
+        }
+        switch (enemy.type) {
+            case ARCHER:
+                return "Archer";
+            case SLIME:
+                return "Slime";
+            case GRUNT:
+            default:
+                return "Grunt";
         }
     }
 
@@ -847,19 +1247,38 @@ public class Game extends JPanel implements Runnable, CombatManager.Listener, Co
         g2.fillRoundRect(Math.round(portraitX - 6f), Math.round(portraitY - 6f), Math.round(portraitSize + 12f),
                 Math.round(portraitSize + 12f), 24, 24);
         portraitState.restore();
-        g2.setColor(GameConfig.COLOR_ENEMY);
+        Color portraitColor = enemyColor(state.enemy);
+        g2.setColor(portraitColor);
         g2.fillRoundRect(Math.round(portraitX), Math.round(portraitY), Math.round(portraitSize),
                 Math.round(portraitSize), 24, 24);
-        g2.setColor(new Color(255, 255, 255, 200));
-        g2.setFont(baseFont.deriveFont(Font.BOLD, 16f));
-        String portraitLabel = state.enemy.name.toUpperCase();
+        g2.setColor(new Color(255, 255, 255, 210));
+        g2.setFont(baseFont.deriveFont(Font.BOLD, 18f));
+        String portraitLabel = enemyTypeName(state.enemy).toUpperCase();
         FontMetrics portraitMetrics = g2.getFontMetrics();
         g2.drawString(portraitLabel,
                 Math.round(portraitX + (portraitSize - portraitMetrics.stringWidth(portraitLabel)) / 2f),
-                Math.round(portraitY + portraitSize / 2f + portraitMetrics.getAscent() / 2f));
+                Math.round(portraitY + portraitSize / 2f));
+
+        if (state.enemy.elite) {
+            g2.setFont(baseFont.deriveFont(Font.BOLD, 14f));
+            g2.setColor(GameConfig.COLOR_ELITE_OUTLINE);
+            String eliteLabel = "ELITE";
+            FontMetrics eliteMetrics = g2.getFontMetrics();
+            g2.drawString(eliteLabel,
+                    Math.round(portraitX + (portraitSize - eliteMetrics.stringWidth(eliteLabel)) / 2f),
+                    Math.round(portraitY + portraitSize - 12f));
+        } else {
+            g2.setFont(baseFont.deriveFont(Font.BOLD, 13f));
+            g2.setColor(new Color(255, 255, 255, 160));
+            String nameLabel = state.enemy.name.toUpperCase();
+            FontMetrics nameMetrics = g2.getFontMetrics();
+            g2.drawString(nameLabel,
+                    Math.round(portraitX + (portraitSize - nameMetrics.stringWidth(nameLabel)) / 2f),
+                    Math.round(portraitY + portraitSize - 12f));
+        }
 
         g2.setFont(baseFont.deriveFont(Font.PLAIN, 13f));
-        String hint = "Press SPACE/ENTER on yellow/green • Avoid red • Hit blue to block";
+        String hint = "SPACE/ENTER on yellow/green • Avoid red • Hit blue to block • Build combo";
         FontMetrics hintMetrics = g2.getFontMetrics();
         g2.setColor(GameConfig.COLOR_TEXT_SECONDARY);
         g2.drawString(hint, Math.round(panelX + (panelWidth - hintMetrics.stringWidth(hint)) / 2f),
@@ -922,37 +1341,47 @@ public class Game extends JPanel implements Runnable, CombatManager.Listener, Co
         FontMetrics pillMetrics = g2.getFontMetrics();
 
         String hpText = "HP " + player.hp + "/" + player.maxHp;
-        String stageText = "Stage 3 — Timing Combat";
+        String stageText = "Stage 4 — Floor " + floor;
+        String shardText = "Shards " + shards;
         String seedText = "Seed: " + currentSeed;
 
         int hpWidth = pillWidth(pillMetrics, hpText);
         int stageWidth = pillWidth(pillMetrics, stageText);
+        int shardWidth = pillWidth(pillMetrics, shardText);
         int seedWidth = pillWidth(pillMetrics, seedText);
 
         int hpX = padding;
-        int stageX = Math.max(padding, (width - stageWidth) / 2);
         int seedX = width - padding - seedWidth;
-        if (stageX < hpX + hpWidth + 8) {
-            stageX = hpX + hpWidth + 8;
+        int shardX = seedX - shardWidth - 12;
+        if (shardX < hpX + hpWidth + 8) {
+            shardX = hpX + hpWidth + 8;
+            seedX = Math.max(seedX, shardX + shardWidth + 12);
         }
-        if (seedX < stageX + stageWidth + 8) {
-            seedX = stageX + stageWidth + 8;
+        int stageX = Math.max(padding + hpWidth + 8, (width - stageWidth) / 2);
+        if (stageX + stageWidth > shardX - 8) {
+            stageX = shardX - stageWidth - 8;
         }
+        stageX = Math.max(stageX, hpX + hpWidth + 8);
 
-        drawHudPill(g2, hpX, 16, hpWidth, pillHeight, pillArc, hpText, GameConfig.COLOR_ACCENT, GameConfig.COLOR_TEXT_PRIMARY, pillMetrics);
-        drawHudPill(g2, stageX, 16, stageWidth, pillHeight, pillArc, stageText, new Color(0x1F232D), GameConfig.COLOR_TEXT_SECONDARY,
+        drawHudPill(g2, hpX, 16, hpWidth, pillHeight, pillArc, hpText, GameConfig.COLOR_ACCENT, GameConfig.COLOR_TEXT_PRIMARY,
                 pillMetrics);
-        drawHudPill(g2, seedX, 16, seedWidth, pillHeight, pillArc, seedText, new Color(0x1A1E27), GameConfig.COLOR_TEXT_SECONDARY,
-                pillMetrics);
+        drawHudPill(g2, stageX, 16, stageWidth, pillHeight, pillArc, stageText, new Color(0x1F232D),
+                GameConfig.COLOR_TEXT_PRIMARY, pillMetrics);
+        drawHudPill(g2, shardX, 16, shardWidth, pillHeight, pillArc, shardText, new Color(0x1A1E27),
+                GameConfig.COLOR_TEXT_PRIMARY, pillMetrics);
+        drawHudPill(g2, seedX, 16, seedWidth, pillHeight, pillArc, seedText, new Color(0x151922),
+                GameConfig.COLOR_TEXT_SECONDARY, pillMetrics);
 
-        Font controlsFont = getFont().deriveFont(Font.PLAIN, 13f);
+        drawRelicChips(g2, padding, GameConfig.HUD_HEIGHT - 30, width - padding * 2);
+
+        Font controlsFont = getFont().deriveFont(Font.PLAIN, 12.5f);
         g2.setFont(controlsFont);
         g2.setColor(GameConfig.COLOR_TEXT_SECONDARY);
-        String controls = "Move: WASD/Arrows   •   Combat: SPACE/ENTER   •   Reroll: N   •   Reseed: S   •   Reload: F5"
-                + "   •   Restart: R   •   Quit: Q";
+        String controls = "Move: WASD/Arrows  •  Interact: E  •  Shop: 1/2  •  Relics: R  •  Descend: E on stairs"
+                + "  •  Reroll: N  •  Reseed: Ctrl+S  •  Reload: F5  •  Quit: Q";
         FontMetrics controlsMetrics = g2.getFontMetrics();
-        int controlsY = GameConfig.HUD_HEIGHT - 14;
-        g2.drawString(controls, (width - controlsMetrics.stringWidth(controls)) / 2, controlsY);
+        int controlsY = GameConfig.HUD_HEIGHT - 10;
+        g2.drawString(controls, Math.max(padding, (width - controlsMetrics.stringWidth(controls)) / 2), controlsY);
     }
 
     private int pillWidth(FontMetrics fm, String text) {
@@ -972,6 +1401,78 @@ public class Game extends JPanel implements Runnable, CombatManager.Listener, Co
         g2.setColor(textColor);
         int textY = y + (height - fm.getHeight()) / 2 + fm.getAscent();
         g2.drawString(text, x + 16, textY);
+    }
+
+    private void drawRelicChips(Graphics2D g2, int startX, int y, int maxWidth) {
+        if (relics.isEmpty()) {
+            return;
+        }
+        Map<String, Integer> counts = new LinkedHashMap<>();
+        Map<String, Relic> unique = new LinkedHashMap<>();
+        for (Relic relic : relics) {
+            counts.merge(relic.id, 1, Integer::sum);
+            unique.putIfAbsent(relic.id, relic);
+        }
+        Font chipFont = getFont().deriveFont(Font.BOLD, 12f);
+        g2.setFont(chipFont);
+        FontMetrics fm = g2.getFontMetrics();
+        int x = startX;
+        int height = 20;
+        int spacing = 8;
+        for (Relic relic : unique.values()) {
+            String label = abbreviateRelicName(relic.name);
+            int count = counts.get(relic.id);
+            if (count > 1) {
+                label += "×" + count;
+            }
+            int width = fm.stringWidth(label) + 18;
+            if (x + width > startX + maxWidth) {
+                break;
+            }
+            CompositeState shadow = new CompositeState(g2);
+            g2.setComposite(AlphaComposite.SrcOver.derive(0.25f));
+            g2.setColor(Color.BLACK);
+            g2.fillRoundRect(x, y + 4, width, height, 16, 16);
+            shadow.restore();
+
+            boolean highlight = isRecentRelicId(relic.id) && relicToastTimer > 0f;
+            Color base = highlight ? lightenColor(GameConfig.COLOR_ACCENT, 0.2f) : new Color(0x1F2431);
+            g2.setColor(base);
+            g2.fillRoundRect(x, y, width, height, 16, 16);
+            g2.setColor(GameConfig.COLOR_TEXT_PRIMARY);
+            g2.drawString(label, x + 10, y + height / 2 + fm.getAscent() / 2 - 3);
+
+            x += width + spacing;
+        }
+    }
+
+    private String abbreviateRelicName(String name) {
+        if (name == null || name.isEmpty()) {
+            return "";
+        }
+        String[] parts = name.split("\\s+");
+        StringBuilder sb = new StringBuilder();
+        for (String part : parts) {
+            if (!part.isEmpty()) {
+                sb.append(Character.toUpperCase(part.charAt(0)));
+                if (sb.length() >= 3) {
+                    break;
+                }
+            }
+        }
+        return sb.toString();
+    }
+
+    private boolean isRecentRelicId(String id) {
+        if (id == null || recentRelics.isEmpty()) {
+            return false;
+        }
+        for (Relic relic : recentRelics) {
+            if (id.equals(relic.id)) {
+                return true;
+            }
+        }
+        return false;
     }
 
     private void drawVignette(Graphics2D g2) {
@@ -1061,7 +1562,7 @@ public class Game extends JPanel implements Runnable, CombatManager.Listener, Co
 
     public static void main(String[] args) {
         SwingUtilities.invokeLater(() -> {
-            JFrame frame = new JFrame("Roguelike — Stage 3 (Timing Combat Encounters)");
+            JFrame frame = new JFrame("Roguelike — Stage 4 (Relics, Elites, and Floors)");
             Game game = new Game();
             frame.setDefaultCloseOperation(JFrame.EXIT_ON_CLOSE);
             frame.setResizable(false);

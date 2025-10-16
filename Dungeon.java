@@ -9,16 +9,22 @@ public class Dungeon {
     private final List<Rect> rooms = new ArrayList<>();
     private final List<Enemy> enemies = new ArrayList<>();
     private final Random rng;
+    private Sanctuary sanctuary;
+    private Stairs stairs;
+    private int floor = 1;
 
     public Dungeon(Random rng) {
         this.rng = rng;
         resetTiles();
     }
 
-    public void generate(long seed, Entity player) {
+    public void generate(long seed, Entity player, int floor) {
         rng.setSeed(seed);
         rooms.clear();
         enemies.clear();
+        sanctuary = null;
+        stairs = null;
+        this.floor = Math.max(1, floor);
 
         resetTiles();
         resetPlayer(player);
@@ -66,7 +72,9 @@ public class Dungeon {
 
         Rect start = rooms.get(0);
         placePlayer(player, start.centerX(), start.centerY());
-        spawnEnemies(player);
+        placeSanctuary(start);
+        placeStairs(start);
+        spawnEnemies(player, start);
     }
 
     public Tile[][] getMap() {
@@ -89,8 +97,28 @@ public class Dungeon {
         return enemies;
     }
 
+    public Sanctuary getSanctuary() {
+        return sanctuary;
+    }
+
+    public Stairs getStairs() {
+        return stairs;
+    }
+
+    public int getFloor() {
+        return floor;
+    }
+
     public boolean isWalkable(int x, int y) {
         return inBounds(x, y) && map[x][y] == Tile.FLOOR;
+    }
+
+    public boolean isSanctuaryTile(int x, int y) {
+        return sanctuary != null && sanctuary.tileX == x && sanctuary.tileY == y;
+    }
+
+    public boolean isStairsTile(int x, int y) {
+        return stairs != null && stairs.tileX == x && stairs.tileY == y;
     }
 
     public Enemy getEnemyAt(int x, int y) {
@@ -190,30 +218,92 @@ public class Dungeon {
         player.moveTime = 0f;
     }
 
-    private void spawnEnemies(Entity player) {
-        int target = GameConfig.ENEMY_MIN_COUNT
-                + rng.nextInt(GameConfig.ENEMY_MAX_COUNT - GameConfig.ENEMY_MIN_COUNT + 1);
+    private void spawnEnemies(Entity player, Rect startRoom) {
+        int target = GameConfig.ENEMIES_MIN
+                + rng.nextInt(GameConfig.ENEMIES_MAX - GameConfig.ENEMIES_MIN + 1);
         int attempts = 0;
-        while (enemies.size() < target && attempts < target * 40) {
+        while (enemies.size() < target && attempts < target * 60) {
             attempts++;
             Rect room = rooms.get(rng.nextInt(rooms.size()));
-            int x = room.x + 1 + rng.nextInt(Math.max(1, Math.max(1, room.w - 2)));
-            int y = room.y + 1 + rng.nextInt(Math.max(1, Math.max(1, room.h - 2)));
-            if (!isWalkable(x, y)) {
+            if (room == startRoom) {
                 continue;
             }
-            if ((x == player.tileX && y == player.tileY) || getEnemyAt(x, y) != null) {
+            int rx = room.x + 1 + rng.nextInt(Math.max(1, room.w - 2));
+            int ry = room.y + 1 + rng.nextInt(Math.max(1, room.h - 2));
+            if (!isWalkable(rx, ry)) {
                 continue;
             }
-            Enemy enemy = new Enemy();
-            enemy.tileX = x;
-            enemy.tileY = y;
-            enemy.maxHp = 28 + rng.nextInt(18);
-            enemy.hp = enemy.maxHp;
-            enemy.minDmg = GameConfig.ENEMY_MIN_DAMAGE;
-            enemy.maxDmg = GameConfig.ENEMY_MAX_DAMAGE;
-            enemy.name = rng.nextBoolean() ? "Shade" : "Warden";
-            enemies.add(enemy);
+            if ((rx == player.tileX && ry == player.tileY) || getEnemyAt(rx, ry) != null) {
+                continue;
+            }
+            if (isSanctuaryTile(rx, ry) || isStairsTile(rx, ry)) {
+                continue;
+            }
+            EnemyType type = rollEnemyType();
+            boolean elite = rng.nextFloat() < GameConfig.ELITE_CHANCE;
+            enemies.add(Enemy.spawn(type, elite, rx, ry, floor));
+        }
+    }
+
+    private EnemyType rollEnemyType() {
+        float roll = rng.nextFloat();
+        if (roll < GameConfig.ARCHER_WEIGHT) {
+            return EnemyType.ARCHER;
+        }
+        if (roll < GameConfig.ARCHER_WEIGHT + GameConfig.SLIME_WEIGHT) {
+            return EnemyType.SLIME;
+        }
+        return EnemyType.GRUNT;
+    }
+
+    private void placeSanctuary(Rect start) {
+        if (rooms.isEmpty()) {
+            sanctuary = null;
+            return;
+        }
+        List<Rect> candidates = new ArrayList<>(rooms);
+        candidates.remove(start);
+        Rect target = candidates.isEmpty() ? start : candidates.get(rng.nextInt(candidates.size()));
+        sanctuary = new Sanctuary(target.centerX(), target.centerY());
+    }
+
+    private void placeStairs(Rect start) {
+        if (rooms.isEmpty()) {
+            stairs = null;
+            return;
+        }
+        int sx = start.centerX();
+        int sy = start.centerY();
+        Rect best = null;
+        int bestDist = -1;
+        for (Rect room : rooms) {
+            int cx = room.centerX();
+            int cy = room.centerY();
+            if (sanctuary != null && sanctuary.tileX == cx && sanctuary.tileY == cy) {
+                continue;
+            }
+            int dist = Math.abs(cx - sx) + Math.abs(cy - sy);
+            if (room != start && dist > bestDist) {
+                bestDist = dist;
+                best = room;
+            }
+        }
+        if (best == null) {
+            best = rooms.get(rooms.size() - 1);
+        }
+        int tx = Math.max(best.x, Math.min(best.x + best.w - 1, best.centerX()));
+        int ty = Math.max(best.y, Math.min(best.y + best.h - 1, best.centerY()));
+        stairs = new Stairs(tx, ty);
+        if (sanctuary != null && sanctuary.tileX == stairs.tileX && sanctuary.tileY == stairs.tileY) {
+            int nx = Math.min(best.x + best.w - 1, stairs.tileX + 1);
+            if (!isWalkable(nx, stairs.tileY)) {
+                nx = Math.max(best.x, stairs.tileX - 1);
+            }
+            int ny = stairs.tileY;
+            if (!isWalkable(nx, ny)) {
+                ny = Math.min(best.y + best.h - 1, stairs.tileY + 1);
+            }
+            stairs = new Stairs(nx, ny);
         }
     }
 }

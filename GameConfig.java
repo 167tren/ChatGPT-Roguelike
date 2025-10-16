@@ -35,14 +35,32 @@ public final class GameConfig {
     public static final Color COLOR_SEGMENT_CRIT = new Color(0x4AF58A);
     public static final Color COLOR_SEGMENT_DANGER = new Color(0xFF546E);
     public static final Color COLOR_SEGMENT_BLOCK = new Color(0x6AA9FF);
+    public static final Color COLOR_ELITE_OUTLINE = new Color(0xFFB347);
+    public static final Color COLOR_STAIRS = new Color(0x4FE8D3);
+    public static final Color COLOR_SANCTUARY = new Color(0x5C6CFF);
 
-    public static final int ENEMY_MIN_COUNT = 6;
-    public static final int ENEMY_MAX_COUNT = 10;
+    public static final int SHARD_PER_WIN = 1;
+    public static final int SHARD_PER_ELITE = 2;
+    public static final float RELIC_DROP_BASE = 0.20f;
+    public static final float RELIC_DROP_FLOOR_BONUS = 0.10f;
+    public static final float RELIC_DROP_ELITE_BONUS = 0.10f;
+
+    public static final float ENEMY_HP_SCALING_PER_FLOOR = 0.15f;
+    public static final float ENEMY_DMG_SCALING_PER_FLOOR = 0.15f;
+    public static final float CURSOR_SPEED_SCALING_PER_FLOOR = 0.05f;
+
+    public static final int COST_RELIC = 3;
+    public static final int COST_HEAL = 2;
+    public static final int SHOP_HEAL_AMOUNT = 25;
+
+    public static final int ENEMIES_MIN = 8;
+    public static final int ENEMIES_MAX = 12;
+    public static final float ELITE_CHANCE = 0.10f;
+    public static final float ARCHER_WEIGHT = 0.30f;
+    public static final float SLIME_WEIGHT = 0.20f;
     public static final int PLAYER_MIN_DAMAGE = 6;
     public static final int PLAYER_MAX_DAMAGE = 10;
     public static final float PLAYER_COMBO_STEP = 0.15f;
-    public static final int ENEMY_MIN_DAMAGE = 4;
-    public static final int ENEMY_MAX_DAMAGE = 8;
     public static final float BLOCK_DAMAGE_REDUCTION = 0.2f;
     public static final float COMBAT_PANEL_HEIGHT_RATIO = 0.34f;
     public static final float COMBAT_TRACK_WIDTH_RATIO = 0.75f;
