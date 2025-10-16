@@ -15,6 +15,8 @@ import java.awt.event.KeyAdapter;
 import java.awt.event.KeyEvent;
 import java.awt.geom.Point2D;
 import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Collections;
 import java.util.List;
 import java.util.Random;
 
@@ -48,6 +50,16 @@ public class Game extends JPanel implements Runnable {
     private static final Color COLOR_TEXT_PRIMARY = new Color(0xEDEFF3);
     private static final Color COLOR_TEXT_SECONDARY = new Color(0xAEB6C2);
     private static final Color COLOR_ACCENT = new Color(0x6BE675);
+    private static final Color COLOR_SANCTUARY = new Color(0x2F2A55);
+    private static final Color COLOR_SANCTUARY_GLOW = new Color(0x6D5BFF);
+    private static final Color COLOR_STAIRS = new Color(0x3A4B4F);
+    private static final Color COLOR_STAIRS_HIGHLIGHT = new Color(0x8ED0E8);
+    private static final Color COLOR_ENEMY = new Color(0xD9607C);
+    private static final Color COLOR_ELITE = new Color(0xF28F45);
+    private static final Color COLOR_OUTLINE = new Color(0xFFD166);
+    private static final Color COLOR_OVERLAY_BACK = new Color(0x141820);
+    private static final Color COLOR_OVERLAY_PANEL = new Color(0x1B2332);
+    private static final Color COLOR_OVERLAY_ACCENT = new Color(0x5F8BFF);
 
     private static final int PANEL_WIDTH = GRID_WIDTH * TILE_SIZE;
     private static final int PANEL_HEIGHT = GRID_HEIGHT * TILE_SIZE + HUD_HEIGHT;
@@ -104,6 +116,27 @@ public class Game extends JPanel implements Runnable {
         int maxHp = 100;
     }
 
+    private static class Enemy extends Entity {
+        String name;
+        boolean elite;
+        int shardReward;
+        int attackPower;
+    }
+
+    private static class RelicDefinition {
+        final String id;
+        final String name;
+        final String description;
+        final int cost;
+
+        RelicDefinition(String id, String name, String description, int cost) {
+            this.id = id;
+            this.name = name;
+            this.description = description;
+            this.cost = cost;
+        }
+    }
+
     private static class Particle {
         float x;
         float y;
@@ -121,9 +154,42 @@ public class Game extends JPanel implements Runnable {
     private final Entity player = new Entity();
     private final List<Particle> particles = new ArrayList<>();
     private final Random rng = new Random();
+    private final List<Enemy> enemies = new ArrayList<>();
 
+    private static final RelicDefinition[] RELIC_LIBRARY = {
+            new RelicDefinition("blood-chalice", "Blood Chalice", "Increase max HP by 25.", 35),
+            new RelicDefinition("glass-blade", "Glass Blade", "Attacks deal +8 damage.", 40),
+            new RelicDefinition("echo-prism", "Echo Prism", "Gain +20% shards from combat.", 30),
+            new RelicDefinition("ward-sigil", "Ward Sigil", "Take 4 less damage from enemies.", 30),
+            new RelicDefinition("sage-bloom", "Sage's Bloom", "Heal 8 HP after each victory.", 28)
+    };
+
+    private long baseSeed;
     private long currentSeed;
     private boolean running;
+    private int currentFloor = 1;
+    private int shardCount;
+    private final List<RelicDefinition> ownedRelics = new ArrayList<>();
+    private final List<RelicDefinition> relicPool = new ArrayList<>();
+
+    private int sanctuaryX = -1;
+    private int sanctuaryY = -1;
+    private int stairsX = -1;
+    private int stairsY = -1;
+
+    private boolean showSanctuaryOverlay;
+    private boolean showRelicOverlay;
+    private int sanctuarySelection;
+    private String sanctuaryStatusText = "";
+
+    private static final int SANCTUARY_OPTION_RELIC = 0;
+    private static final int SANCTUARY_OPTION_HEAL = 1;
+    private static final int SANCTUARY_OPTION_LEAVE = 2;
+    private static final int SANCTUARY_RELIC_COST = 35;
+    private static final int SANCTUARY_HEAL_COST = 15;
+    private static final int SANCTUARY_HEAL_AMOUNT = 45;
+
+    private final CombatManager combatManager = new CombatManager();
 
     public Game() {
         setPreferredSize(new Dimension(PANEL_WIDTH, PANEL_HEIGHT));
@@ -131,21 +197,19 @@ public class Game extends JPanel implements Runnable {
         setDoubleBuffered(true);
         setBackground(COLOR_BG);
 
-        setSeed(System.nanoTime());
-        generateDungeon();
+        beginRun(System.nanoTime());
         initInput();
-    }
-
-    private void setSeed(long seed) {
-        currentSeed = seed;
     }
 
     private void generateDungeon() {
         rng.setSeed(currentSeed);
         rooms.clear();
         particles.clear();
+        enemies.clear();
         player.moving = false;
         player.moveTime = 0f;
+        sanctuaryX = sanctuaryY = -1;
+        stairsX = stairsY = -1;
 
         for (int x = 0; x < GRID_WIDTH; x++) {
             for (int y = 0; y < GRID_HEIGHT; y++) {
@@ -198,6 +262,9 @@ public class Game extends JPanel implements Runnable {
 
         Rect start = rooms.get(0);
         placePlayer(start.centerX(), start.centerY());
+
+        placeSanctuaryAndStairs();
+        populateEnemies();
     }
 
     private void carveRoom(Rect room) {
@@ -206,6 +273,89 @@ public class Game extends JPanel implements Runnable {
                 carveFloor(x, y);
             }
         }
+    }
+
+    private void placeSanctuaryAndStairs() {
+        if (rooms.isEmpty()) {
+            return;
+        }
+        Rect sanctuaryRoom = rooms.size() > 1 ? rooms.get(rng.nextInt(rooms.size() - 1) + 1) : rooms.get(0);
+        Rect stairsRoom = rooms.get(rooms.size() - 1);
+        if (sanctuaryRoom == rooms.get(0)) {
+            sanctuaryRoom = rooms.get(rooms.size() / 2);
+        }
+        if (sanctuaryRoom == stairsRoom && rooms.size() > 2) {
+            sanctuaryRoom = rooms.get(rooms.size() / 2);
+        }
+        sanctuaryX = sanctuaryRoom.centerX();
+        sanctuaryY = sanctuaryRoom.centerY();
+        stairsX = stairsRoom.centerX();
+        stairsY = stairsRoom.centerY();
+        if (sanctuaryX == stairsX && sanctuaryY == stairsY) {
+            sanctuaryX = Math.min(GRID_WIDTH - 2, sanctuaryRoom.x + 1);
+            sanctuaryY = Math.min(GRID_HEIGHT - 2, sanctuaryRoom.y + 1);
+        }
+    }
+
+    private void populateEnemies() {
+        enemies.clear();
+        if (rooms.isEmpty()) {
+            return;
+        }
+        int desired = Math.min(rooms.size(), 4 + currentFloor * 2);
+        for (int i = 1; i < rooms.size(); i++) {
+            if (enemies.size() >= desired) {
+                break;
+            }
+            Rect room = rooms.get(i);
+            int attempts = 0;
+            while (attempts++ < 6) {
+                int spawnX = room.x + 1 + rng.nextInt(Math.max(1, room.w - 2));
+                int spawnY = room.y + 1 + rng.nextInt(Math.max(1, room.h - 2));
+                if ((spawnX == sanctuaryX && spawnY == sanctuaryY) || (spawnX == stairsX && spawnY == stairsY)
+                        || (spawnX == player.tileX && spawnY == player.tileY)) {
+                    continue;
+                }
+                if (getEnemyAt(spawnX, spawnY) != null) {
+                    continue;
+                }
+                if (rng.nextFloat() > 0.6f) {
+                    continue;
+                }
+                Enemy enemy = new Enemy();
+                enemy.tileX = spawnX;
+                enemy.tileY = spawnY;
+                enemy.renderX = spawnX;
+                enemy.renderY = spawnY;
+                enemy.startX = spawnX;
+                enemy.startY = spawnY;
+                enemy.targetX = spawnX;
+                enemy.targetY = spawnY;
+                enemy.moving = false;
+                enemy.moveTime = 0f;
+                enemy.elite = rng.nextFloat() < 0.18f + currentFloor * 0.04f;
+                enemy.name = enemy.elite ? "Ascended Warden" : "Shattered Husk";
+                int baseHp = 60 + currentFloor * 18;
+                if (enemy.elite) {
+                    baseHp += 40 + currentFloor * 6;
+                }
+                enemy.maxHp = baseHp;
+                enemy.hp = baseHp;
+                enemy.attackPower = 10 + currentFloor * 2 + (enemy.elite ? 5 : 0);
+                enemy.shardReward = 12 + currentFloor * 4 + (enemy.elite ? 8 : 0);
+                enemies.add(enemy);
+                break;
+            }
+        }
+    }
+
+    private Enemy getEnemyAt(int x, int y) {
+        for (Enemy enemy : enemies) {
+            if (enemy.tileX == x && enemy.tileY == y) {
+                return enemy;
+            }
+        }
+        return null;
     }
 
     private void carveCorridor(Rect from, Rect to) {
@@ -280,23 +430,45 @@ public class Game extends JPanel implements Runnable {
     }
 
     private boolean handleKey(int keyCode) {
+        if (showSanctuaryOverlay) {
+            return handleSanctuaryOverlayInput(keyCode);
+        }
+        if (showRelicOverlay) {
+            if (keyCode == KeyEvent.VK_R || keyCode == KeyEvent.VK_ESCAPE) {
+                showRelicOverlay = false;
+                return true;
+            }
+            return false;
+        }
         if (keyCode == KeyEvent.VK_Q) {
             System.exit(0);
             return true;
         }
         if (keyCode == KeyEvent.VK_N) {
-            setSeed(System.nanoTime());
-            generateDungeon();
+            beginRun(System.nanoTime());
             return true;
         }
         if (keyCode == KeyEvent.VK_F5) {
-            generateDungeon();
+            regenerateCurrentFloor();
             return true;
         }
-        // Use 'R' (not 'S') for reseed to avoid conflict with Down/WASD-S.
+        if (keyCode == KeyEvent.VK_P) {
+            beginRun(DEMO_SEED);
+            return true;
+        }
         if (keyCode == KeyEvent.VK_R) {
-            setSeed(DEMO_SEED);
-            generateDungeon();
+            showRelicOverlay = !showRelicOverlay;
+            return true;
+        }
+        if (keyCode == KeyEvent.VK_E) {
+            if (player.tileX == sanctuaryX && player.tileY == sanctuaryY) {
+                openSanctuaryOverlay();
+                return true;
+            }
+            if (player.tileX == stairsX && player.tileY == stairsY) {
+                descendStairs();
+                return true;
+            }
             return true;
         }
         if (player.moving) {
@@ -325,6 +497,16 @@ public class Game extends JPanel implements Runnable {
         int newY = player.tileY + dy;
         if (!isWalkable(newX, newY)) {
             return false;
+        }
+        Enemy enemy = getEnemyAt(newX, newY);
+        if (enemy != null) {
+            boolean victory = combatManager.engage(enemy);
+            if (!victory) {
+                return true;
+            }
+        }
+        if (getEnemyAt(newX, newY) != null) {
+            return true;
         }
         int fromX = player.tileX;
         int fromY = player.tileY;
@@ -465,11 +647,18 @@ public class Game extends JPanel implements Runnable {
 
         g2.translate(0, HUD_HEIGHT);
         drawTiles(g2);
+        drawEnemies(g2);
         drawParticles(g2);
         drawPlayer(g2);
         g2.translate(0, -HUD_HEIGHT);
 
         drawVignette(g2);
+
+        if (showSanctuaryOverlay) {
+            drawSanctuaryOverlay(g2);
+        } else if (showRelicOverlay) {
+            drawRelicOverlay(g2);
+        }
 
         g2.dispose();
     }
@@ -530,6 +719,47 @@ public class Game extends JPanel implements Runnable {
             }
             state.restore();
         }
+
+        if (x == sanctuaryX && y == sanctuaryY) {
+            drawSanctuaryTile(g2, px, py);
+        } else if (x == stairsX && y == stairsY) {
+            drawStairsTile(g2, px, py);
+        }
+    }
+
+    private void drawSanctuaryTile(Graphics2D g2, int px, int py) {
+        int size = TILE_SIZE - 6;
+        int offset = 3;
+        CompositeState state = new CompositeState(g2);
+        g2.setComposite(AlphaComposite.SrcOver.derive(0.85f));
+        g2.setColor(COLOR_SANCTUARY);
+        g2.fillRoundRect(px + offset, py + offset, size, size, 12, 12);
+        state.restore();
+
+        GradientPaint glow = new GradientPaint(px, py, COLOR_SANCTUARY_GLOW, px, py + TILE_SIZE,
+                new Color(COLOR_SANCTUARY_GLOW.getRed(), COLOR_SANCTUARY_GLOW.getGreen(), COLOR_SANCTUARY_GLOW.getBlue(), 20));
+        PaintState paintState = new PaintState(g2);
+        g2.setPaint(glow);
+        g2.fillOval(px + offset - 4, py + offset - 4, size + 8, size + 8);
+        paintState.restore();
+
+        g2.setColor(new Color(0x8E82FF));
+        g2.setStroke(new BasicStroke(2f));
+        g2.drawRoundRect(px + offset, py + offset, size, size, 12, 12);
+    }
+
+    private void drawStairsTile(Graphics2D g2, int px, int py) {
+        g2.setColor(COLOR_STAIRS);
+        g2.fillRoundRect(px + 3, py + 3, TILE_SIZE - 6, TILE_SIZE - 6, 10, 10);
+        g2.setColor(COLOR_STAIRS_HIGHLIGHT);
+        int stepHeight = 4;
+        for (int i = 0; i < 3; i++) {
+            int stepY = py + 5 + i * (stepHeight + 2);
+            g2.fillRoundRect(px + 5 + i * 2, stepY, TILE_SIZE - 10 - i * 4, stepHeight, 6, 6);
+        }
+        g2.setColor(new Color(0x1E2C30));
+        g2.setStroke(new BasicStroke(2f));
+        g2.drawRoundRect(px + 3, py + 3, TILE_SIZE - 6, TILE_SIZE - 6, 10, 10);
     }
 
     private void drawWallTile(Graphics2D g2, int x, int y) {
@@ -560,6 +790,46 @@ public class Game extends JPanel implements Runnable {
             g2.fillOval(Math.round(p.x - size / 2f), Math.round(p.y - size / 2f),
                         Math.round(size), Math.round(size));
             state.restore();
+        }
+    }
+
+    private void drawEnemies(Graphics2D g2) {
+        for (Enemy enemy : enemies) {
+            float ex = enemy.tileX * TILE_SIZE;
+            float ey = enemy.tileY * TILE_SIZE;
+            float shadowW = TILE_SIZE * 0.6f;
+            float shadowH = TILE_SIZE * 0.22f;
+            float shadowX = ex + (TILE_SIZE - shadowW) / 2f;
+            float shadowY = ey + TILE_SIZE - shadowH * 1.1f;
+
+            CompositeState state = new CompositeState(g2);
+            g2.setComposite(AlphaComposite.SrcOver.derive(0.4f));
+            g2.setColor(Color.BLACK);
+            g2.fillOval(Math.round(shadowX), Math.round(shadowY), Math.round(shadowW), Math.round(shadowH));
+            state.restore();
+
+            int bodyX = Math.round(ex + TILE_SIZE * 0.2f);
+            int bodyY = Math.round(ey + TILE_SIZE * 0.2f);
+            int bodySize = Math.round(TILE_SIZE * 0.6f);
+            Color base = enemy.elite ? COLOR_ELITE : COLOR_ENEMY;
+            g2.setColor(base);
+            g2.fillRoundRect(bodyX, bodyY, bodySize, bodySize, bodySize / 2, bodySize / 2);
+
+            if (enemy.elite) {
+                g2.setColor(COLOR_OUTLINE);
+                g2.setStroke(new BasicStroke(2f));
+                g2.drawRoundRect(bodyX, bodyY, bodySize, bodySize, bodySize / 2, bodySize / 2);
+            }
+
+            float healthRatio = Math.max(0f, Math.min(1f, enemy.hp / (float) enemy.maxHp));
+            int barWidth = Math.round(bodySize * healthRatio);
+            int barHeight = 4;
+            int barX = bodyX;
+            int barY = bodyY - 6;
+            g2.setColor(new Color(26, 30, 39, 180));
+            g2.fillRoundRect(barX, barY, bodySize, barHeight, 4, 4);
+            g2.setColor(COLOR_PARTICLE);
+            g2.fillRoundRect(barX, barY, barWidth, barHeight, 4, 4);
         }
     }
 
@@ -620,32 +890,48 @@ public class Game extends JPanel implements Runnable {
         g2.setFont(pillFont);
         FontMetrics pillMetrics = g2.getFontMetrics();
 
-        String hpText = "HP 100/100";
-        String stageText = "Stage 2 — Procedural Dungeon";
-        String seedText = "Seed: " + currentSeed;
+        String hpText = "HP " + player.hp + "/" + player.maxHp;
+        String stageText = "Stage 4 — Sanctuaries & Relics";
+        String floorText = "Floor " + currentFloor;
+        String shardText = shardCount + " Shards";
+        String seedText = "Seed " + baseSeed;
 
         int hpWidth = pillWidth(pillMetrics, hpText);
         int stageWidth = pillWidth(pillMetrics, stageText);
+        int floorWidth = pillWidth(pillMetrics, floorText);
+        int shardWidth = pillWidth(pillMetrics, shardText);
         int seedWidth = pillWidth(pillMetrics, seedText);
 
         int hpX = padding;
         int stageX = Math.max(padding, (width - stageWidth) / 2);
         int seedX = width - padding - seedWidth;
-        if (stageX < hpX + hpWidth + 8) {
-            stageX = hpX + hpWidth + 8;
+        int shardX = seedX - 12 - shardWidth;
+        int floorX = shardX - 12 - floorWidth;
+        int rightBoundary = floorX;
+        if (stageX + stageWidth + 12 > rightBoundary) {
+            stageX = rightBoundary - stageWidth - 12;
         }
-        if (seedX < stageX + stageWidth + 8) {
-            seedX = stageX + stageWidth + 8;
+        if (stageX < hpX + hpWidth + 12) {
+            stageX = hpX + hpWidth + 12;
+        }
+        if (floorX < stageX + stageWidth + 12) {
+            floorX = stageX + stageWidth + 12;
+            shardX = floorX + floorWidth + 12;
+            seedX = shardX + shardWidth + 12;
         }
 
         drawHudPill(g2, hpX, 16, hpWidth, pillHeight, pillArc, hpText, COLOR_ACCENT, COLOR_TEXT_PRIMARY, pillMetrics);
         drawHudPill(g2, stageX, 16, stageWidth, pillHeight, pillArc, stageText, new Color(0x1F232D), COLOR_TEXT_SECONDARY, pillMetrics);
-        drawHudPill(g2, seedX, 16, seedWidth, pillHeight, pillArc, seedText, new Color(0x1A1E27), COLOR_TEXT_SECONDARY, pillMetrics);
+        drawHudPill(g2, floorX, 16, floorWidth, pillHeight, pillArc, floorText, new Color(0x1A1E27), COLOR_TEXT_SECONDARY, pillMetrics);
+        drawHudPill(g2, shardX, 16, shardWidth, pillHeight, pillArc, shardText, new Color(0x212835), COLOR_TEXT_PRIMARY, pillMetrics);
+        drawHudPill(g2, seedX, 16, seedWidth, pillHeight, pillArc, seedText, new Color(0x161B24), COLOR_TEXT_SECONDARY, pillMetrics);
+
+        drawRelicChips(g2, padding, HUD_HEIGHT - 46, width - padding * 2);
 
         Font controlsFont = getFont().deriveFont(Font.PLAIN, 13f);
         g2.setFont(controlsFont);
         g2.setColor(COLOR_TEXT_SECONDARY);
-        String controls = "Move: WASD/Arrows   •   Reroll: N   •   Demo Seed: R   •   Reload: F5   •   Quit: Q";
+        String controls = "Move: WASD/Arrows   •   Interact: E   •   Relics: R   •   New Seed: N   •   Demo Seed: P   •   Reload: F5   •   Quit: Q";
         FontMetrics controlsMetrics = g2.getFontMetrics();
         int controlsY = HUD_HEIGHT - 14;
         g2.drawString(controls, (width - controlsMetrics.stringWidth(controls)) / 2, controlsY);
@@ -670,6 +956,51 @@ public class Game extends JPanel implements Runnable {
         g2.drawString(text, x + 16, textY);
     }
 
+    private void drawRelicChips(Graphics2D g2, int x, int y, int availableWidth) {
+        int chipSize = 26;
+        int spacing = 8;
+        int maxVisible = Math.max(1, (availableWidth + spacing) / (chipSize + spacing));
+        int shown = Math.min(ownedRelics.size(), maxVisible);
+        int chipY = y;
+
+        if (shown == 0) {
+            g2.setFont(getFont().deriveFont(Font.PLAIN, 13f));
+            g2.setColor(COLOR_TEXT_SECONDARY);
+            g2.drawString("No relics — visit sanctuaries to acquire them.", x, y + chipSize - 6);
+            return;
+        }
+
+        for (int i = 0; i < shown; i++) {
+            RelicDefinition relic = ownedRelics.get(i);
+            int chipX = x + i * (chipSize + spacing);
+            g2.setColor(new Color(0x202B3A));
+            g2.fillRoundRect(chipX, chipY, chipSize, chipSize, 10, 10);
+            g2.setColor(COLOR_OVERLAY_ACCENT);
+            g2.drawRoundRect(chipX, chipY, chipSize, chipSize, 10, 10);
+            g2.setFont(getFont().deriveFont(Font.BOLD, 14f));
+            g2.setColor(COLOR_TEXT_PRIMARY);
+            String label = relic.name.substring(0, 1);
+            FontMetrics fm = g2.getFontMetrics();
+            g2.drawString(label, chipX + (chipSize - fm.stringWidth(label)) / 2,
+                    chipY + (chipSize + fm.getAscent()) / 2 - 4);
+        }
+
+        if (ownedRelics.size() > shown) {
+            int remaining = ownedRelics.size() - shown;
+            int chipX = x + shown * (chipSize + spacing);
+            g2.setColor(new Color(0x202B3A));
+            g2.fillRoundRect(chipX, chipY, chipSize, chipSize, 10, 10);
+            g2.setColor(COLOR_OVERLAY_ACCENT);
+            g2.drawRoundRect(chipX, chipY, chipSize, chipSize, 10, 10);
+            g2.setFont(getFont().deriveFont(Font.BOLD, 13f));
+            g2.setColor(COLOR_TEXT_PRIMARY);
+            String label = "+" + remaining;
+            FontMetrics fm = g2.getFontMetrics();
+            g2.drawString(label, chipX + (chipSize - fm.stringWidth(label)) / 2,
+                    chipY + (chipSize + fm.getAscent()) / 2 - 4);
+        }
+    }
+
     private void drawVignette(Graphics2D g2) {
         int width = getWidth();
         int height = getHeight();
@@ -684,6 +1015,130 @@ public class Game extends JPanel implements Runnable {
         g2.fillRect(0, 0, width, height);
         compositeState.restore();
         paintState.restore();
+    }
+
+    private void drawSanctuaryOverlay(Graphics2D g2) {
+        CompositeState state = new CompositeState(g2);
+        g2.setComposite(AlphaComposite.SrcOver.derive(0.65f));
+        g2.setColor(COLOR_OVERLAY_BACK);
+        g2.fillRect(0, 0, getWidth(), getHeight());
+        state.restore();
+
+        int panelWidth = 420;
+        int panelHeight = 280;
+        int panelX = (getWidth() - panelWidth) / 2;
+        int panelY = (getHeight() - panelHeight) / 2;
+
+        g2.setColor(COLOR_OVERLAY_PANEL);
+        g2.fillRoundRect(panelX, panelY, panelWidth, panelHeight, 24, 24);
+        g2.setColor(COLOR_OVERLAY_ACCENT);
+        g2.setStroke(new BasicStroke(2f));
+        g2.drawRoundRect(panelX, panelY, panelWidth, panelHeight, 24, 24);
+
+        Font titleFont = getFont().deriveFont(Font.BOLD, 22f);
+        g2.setFont(titleFont);
+        g2.setColor(COLOR_TEXT_PRIMARY);
+        g2.drawString("Sanctuary", panelX + 32, panelY + 48);
+
+        Font infoFont = getFont().deriveFont(Font.PLAIN, 16f);
+        g2.setFont(infoFont);
+        g2.setColor(COLOR_TEXT_SECONDARY);
+        g2.drawString("Shards: " + shardCount, panelX + panelWidth - 140, panelY + 48);
+
+        String relicOption = relicPool.isEmpty() ? "No relics remaining" : "Acquire Relic — " + relicCostForFloor() + " shards";
+        String healOption = "Restore Health — " + healCostForFloor() + " shards";
+        String leaveOption = "Leave Sanctuary";
+        List<String> options = Arrays.asList(relicOption, healOption, leaveOption);
+
+        int optionY = panelY + 96;
+        int optionHeight = 44;
+        for (int i = 0; i < options.size(); i++) {
+            boolean selected = sanctuarySelection == i;
+            int y = optionY + i * (optionHeight + 12);
+            if (selected) {
+                g2.setColor(new Color(0x23304A));
+                g2.fillRoundRect(panelX + 28, y - 22, panelWidth - 56, optionHeight, 16, 16);
+                g2.setColor(COLOR_OVERLAY_ACCENT);
+                g2.drawRoundRect(panelX + 28, y - 22, panelWidth - 56, optionHeight, 16, 16);
+            }
+
+            g2.setFont(getFont().deriveFont(Font.BOLD, 17f));
+            if (i == SANCTUARY_OPTION_RELIC && (relicPool.isEmpty() || shardCount < relicCostForFloor())) {
+                g2.setColor(COLOR_TEXT_SECONDARY);
+            } else if (i == SANCTUARY_OPTION_HEAL && (player.hp >= player.maxHp || shardCount < healCostForFloor())) {
+                g2.setColor(COLOR_TEXT_SECONDARY);
+            } else {
+                g2.setColor(COLOR_TEXT_PRIMARY);
+            }
+            g2.drawString(options.get(i), panelX + 40, y);
+        }
+
+        g2.setFont(infoFont);
+        g2.setColor(COLOR_TEXT_SECONDARY);
+        g2.drawString("Enter: confirm   •   Esc/E: close", panelX + 32, panelY + panelHeight - 48);
+
+        if (!sanctuaryStatusText.isEmpty()) {
+            g2.setColor(COLOR_TEXT_PRIMARY);
+            g2.drawString(sanctuaryStatusText, panelX + 32, panelY + panelHeight - 72);
+        }
+    }
+
+    private void drawRelicOverlay(Graphics2D g2) {
+        CompositeState state = new CompositeState(g2);
+        g2.setComposite(AlphaComposite.SrcOver.derive(0.65f));
+        g2.setColor(COLOR_OVERLAY_BACK);
+        g2.fillRect(0, 0, getWidth(), getHeight());
+        state.restore();
+
+        int panelWidth = 460;
+        int panelHeight = 320;
+        int panelX = (getWidth() - panelWidth) / 2;
+        int panelY = (getHeight() - panelHeight) / 2;
+
+        g2.setColor(COLOR_OVERLAY_PANEL);
+        g2.fillRoundRect(panelX, panelY, panelWidth, panelHeight, 24, 24);
+        g2.setColor(COLOR_OVERLAY_ACCENT);
+        g2.setStroke(new BasicStroke(2f));
+        g2.drawRoundRect(panelX, panelY, panelWidth, panelHeight, 24, 24);
+
+        g2.setFont(getFont().deriveFont(Font.BOLD, 22f));
+        g2.setColor(COLOR_TEXT_PRIMARY);
+        g2.drawString("Relic Archive", panelX + 32, panelY + 48);
+
+        g2.setFont(getFont().deriveFont(Font.PLAIN, 15f));
+        g2.setColor(COLOR_TEXT_SECONDARY);
+        g2.drawString("R/Esc: close", panelX + panelWidth - 140, panelY + 48);
+
+        int listY = panelY + 92;
+        int lineSpacing = 48;
+        if (ownedRelics.isEmpty()) {
+            g2.setColor(COLOR_TEXT_SECONDARY);
+            g2.drawString("No relics collected yet. Visit sanctuaries to acquire them.", panelX + 32, listY);
+            return;
+        }
+
+        for (int i = 0; i < ownedRelics.size(); i++) {
+            RelicDefinition relic = ownedRelics.get(i);
+            int y = listY + i * lineSpacing;
+            int chipSize = 36;
+            int chipX = panelX + 32;
+            int chipY = y - chipSize + 12;
+            g2.setColor(new Color(0x223044));
+            g2.fillRoundRect(chipX, chipY, chipSize, chipSize, 12, 12);
+            g2.setColor(COLOR_OVERLAY_ACCENT);
+            g2.drawRoundRect(chipX, chipY, chipSize, chipSize, 12, 12);
+            g2.setFont(getFont().deriveFont(Font.BOLD, 18f));
+            g2.setColor(COLOR_TEXT_PRIMARY);
+            String initial = relic.name.substring(0, 1);
+            FontMetrics fm = g2.getFontMetrics();
+            g2.drawString(initial, chipX + (chipSize - fm.stringWidth(initial)) / 2, chipY + chipSize / 2 + fm.getAscent() / 2 - 4);
+
+            g2.setFont(getFont().deriveFont(Font.BOLD, 17f));
+            g2.drawString(relic.name, chipX + chipSize + 16, y - 4);
+            g2.setFont(getFont().deriveFont(Font.PLAIN, 14f));
+            g2.setColor(COLOR_TEXT_SECONDARY);
+            g2.drawString(relic.description, chipX + chipSize + 16, y + 16);
+        }
     }
 
     private long tileHash(long seed, int x, int y) {
@@ -726,6 +1181,191 @@ public class Game extends JPanel implements Runnable {
         return t * (2f - t);
     }
 
+    private boolean hasRelic(String id) {
+        for (RelicDefinition relic : ownedRelics) {
+            if (relic.id.equals(id)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private void healPlayer(int amount) {
+        player.hp = Math.min(player.maxHp, player.hp + amount);
+    }
+
+    private void handlePlayerDefeat() {
+        shardCount = Math.max(0, shardCount / 2);
+        player.hp = player.maxHp;
+        regenerateCurrentFloor();
+    }
+
+    private void spawnRewardParticles(int tileX, int tileY) {
+        float originX = (tileX + 0.5f) * TILE_SIZE;
+        float originY = (tileY + 0.35f) * TILE_SIZE;
+        for (int i = 0; i < 12; i++) {
+            Particle p = new Particle();
+            float angle = (float) (rng.nextFloat() * Math.PI * 2);
+            float speed = 30f + rng.nextFloat() * 50f;
+            p.x = originX;
+            p.y = originY;
+            p.vx = (float) Math.cos(angle) * speed;
+            p.vy = (float) Math.sin(angle) * speed;
+            p.life = 0f;
+            p.maxLife = 0.5f + rng.nextFloat() * 0.25f;
+            p.radius = 2f + rng.nextFloat() * 1.5f;
+            particles.add(p);
+        }
+    }
+
+    private void beginRun(long seed) {
+        baseSeed = seed;
+        currentFloor = 1;
+        shardCount = 0;
+        ownedRelics.clear();
+        relicPool.clear();
+        Collections.addAll(relicPool, RELIC_LIBRARY);
+        recalculateDerivedStats();
+        player.hp = player.maxHp;
+        sanctuaryStatusText = "";
+        showSanctuaryOverlay = false;
+        showRelicOverlay = false;
+        updateSeedForCurrentFloor();
+        generateDungeon();
+    }
+
+    private void regenerateCurrentFloor() {
+        showSanctuaryOverlay = false;
+        showRelicOverlay = false;
+        sanctuaryStatusText = "";
+        sanctuarySelection = 0;
+        updateSeedForCurrentFloor();
+        generateDungeon();
+    }
+
+    private void updateSeedForCurrentFloor() {
+        currentSeed = computeFloorSeed(baseSeed, currentFloor);
+    }
+
+    private long computeFloorSeed(long seed, int floor) {
+        return seed + (long) floor * 104729L;
+    }
+
+    private void recalculateDerivedStats() {
+        int maxHp = 100;
+        if (hasRelic("blood-chalice")) {
+            maxHp += 25;
+        }
+        if (hasRelic("sage-bloom")) {
+            maxHp += 10;
+        }
+        player.maxHp = maxHp;
+        player.hp = Math.min(player.hp, player.maxHp);
+    }
+
+    private void acquireRelic(RelicDefinition definition) {
+        ownedRelics.add(definition);
+        relicPool.remove(definition);
+        recalculateDerivedStats();
+    }
+
+    private void openSanctuaryOverlay() {
+        showSanctuaryOverlay = true;
+        showRelicOverlay = false;
+        sanctuarySelection = 0;
+        sanctuaryStatusText = "";
+    }
+
+    private boolean handleSanctuaryOverlayInput(int keyCode) {
+        switch (keyCode) {
+            case KeyEvent.VK_ESCAPE:
+            case KeyEvent.VK_E:
+                showSanctuaryOverlay = false;
+                return true;
+            case KeyEvent.VK_UP:
+            case KeyEvent.VK_W:
+                sanctuarySelection = (sanctuarySelection + 3 - 1) % 3;
+                return true;
+            case KeyEvent.VK_DOWN:
+            case KeyEvent.VK_S:
+                sanctuarySelection = (sanctuarySelection + 1) % 3;
+                return true;
+            case KeyEvent.VK_ENTER:
+            case KeyEvent.VK_SPACE:
+                activateSanctuarySelection();
+                return true;
+            default:
+                return false;
+        }
+    }
+
+    private void activateSanctuarySelection() {
+        switch (sanctuarySelection) {
+            case SANCTUARY_OPTION_RELIC:
+                purchaseRelic();
+                break;
+            case SANCTUARY_OPTION_HEAL:
+                purchaseHeal();
+                break;
+            case SANCTUARY_OPTION_LEAVE:
+                showSanctuaryOverlay = false;
+                break;
+            default:
+                break;
+        }
+    }
+
+    private int relicCostForFloor() {
+        return SANCTUARY_RELIC_COST + Math.max(0, currentFloor - 1) * 5;
+    }
+
+    private int healCostForFloor() {
+        return SANCTUARY_HEAL_COST + Math.max(0, currentFloor - 1) * 3;
+    }
+
+    private void purchaseRelic() {
+        if (relicPool.isEmpty()) {
+            sanctuaryStatusText = "The sanctuary is out of relics.";
+            return;
+        }
+        int cost = relicCostForFloor();
+        if (shardCount < cost) {
+            sanctuaryStatusText = "Need " + (cost - shardCount) + " more shards.";
+            return;
+        }
+        RelicDefinition definition = relicPool.get(rng.nextInt(relicPool.size()));
+        shardCount -= cost;
+        acquireRelic(definition);
+        sanctuaryStatusText = "You received " + definition.name + "!";
+    }
+
+    private void purchaseHeal() {
+        if (player.hp >= player.maxHp) {
+            sanctuaryStatusText = "Already at full strength.";
+            return;
+        }
+        int cost = healCostForFloor();
+        if (shardCount < cost) {
+            sanctuaryStatusText = "Need " + (cost - shardCount) + " more shards.";
+            return;
+        }
+        shardCount -= cost;
+        int missing = player.maxHp - player.hp;
+        int healAmount = Math.min(missing, SANCTUARY_HEAL_AMOUNT + currentFloor * 5);
+        healPlayer(healAmount);
+        sanctuaryStatusText = "Recovered " + healAmount + " HP.";
+    }
+
+    private void descendStairs() {
+        currentFloor++;
+        showSanctuaryOverlay = false;
+        showRelicOverlay = false;
+        sanctuaryStatusText = "";
+        sanctuarySelection = 0;
+        updateSeedForCurrentFloor();
+        generateDungeon();
+    }
+
     private static class CompositeState {
         private final Graphics2D g2;
         private final Composite composite;
@@ -754,9 +1394,73 @@ public class Game extends JPanel implements Runnable {
         }
     }
 
+    private class CombatManager {
+        boolean engage(Enemy enemy) {
+            if (enemy == null) {
+                return false;
+            }
+            int enemyHp = enemy.hp;
+            int playerHp = player.hp;
+
+            while (enemyHp > 0 && playerHp > 0) {
+                enemyHp -= Math.max(1, computePlayerDamage());
+                if (enemyHp <= 0) {
+                    break;
+                }
+                playerHp -= Math.max(0, computeEnemyDamage(enemy));
+            }
+
+            player.hp = Math.max(0, playerHp);
+            enemy.hp = Math.max(0, enemyHp);
+
+            if (player.hp <= 0) {
+                handlePlayerDefeat();
+                return false;
+            }
+
+            handleEnemyDefeat(enemy);
+            return true;
+        }
+
+        private int computePlayerDamage() {
+            int base = 18 + currentFloor * 2 + rng.nextInt(6);
+            if (hasRelic("glass-blade")) {
+                base += 8;
+            }
+            if (hasRelic("blood-chalice")) {
+                base += 2;
+            }
+            return base;
+        }
+
+        private int computeEnemyDamage(Enemy enemy) {
+            int base = enemy.attackPower + rng.nextInt(4);
+            if (enemy.elite) {
+                base += 4;
+            }
+            if (hasRelic("ward-sigil")) {
+                base = Math.max(0, base - 4);
+            }
+            return base;
+        }
+
+        private void handleEnemyDefeat(Enemy enemy) {
+            enemies.remove(enemy);
+            int reward = enemy.shardReward;
+            if (hasRelic("echo-prism")) {
+                reward = Math.round(reward * 1.2f);
+            }
+            shardCount += reward;
+            if (hasRelic("sage-bloom")) {
+                healPlayer(8);
+            }
+            spawnRewardParticles(enemy.tileX, enemy.tileY);
+        }
+    }
+
     public static void main(String[] args) {
         SwingUtilities.invokeLater(() -> {
-            JFrame frame = new JFrame("Roguelike — Stage 2 (Java 2D, Visual Dungeon)");
+            JFrame frame = new JFrame("Roguelike — Stage 4 (Sanctuaries & Relics)");
             Game game = new Game();
             frame.setDefaultCloseOperation(JFrame.EXIT_ON_CLOSE);
             frame.setResizable(false);
