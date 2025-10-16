@@ -8,6 +8,8 @@ public class CombatManager {
         void onVictory(Enemy enemy, VictoryReward reward);
 
         void onDefeat();
+
+        void onGuardChargesChanged(int charges);
     }
 
     public interface Effects {
@@ -39,7 +41,7 @@ public class CombatManager {
         this.effects = effects;
     }
 
-    public void beginCombat(Enemy enemy, List<Relic> relics, int shards, int floor) {
+    public void beginCombat(Enemy enemy, List<Relic> relics, int shards, int floor, int guardCharges) {
         state = new CombatState();
         state.enemy = enemy;
         state.comboCount = 0;
@@ -49,6 +51,18 @@ public class CombatManager {
         state.relics = relics;
         state.shards = shards;
         state.floor = Math.max(1, floor);
+        state.storedGuardCharges = Math.max(0, guardCharges);
+        state.enemyStrikeScheduled = false;
+        state.missStreak = 0;
+        state.hitStopTimer = 0f;
+        state.enemyBarFlash = 0f;
+        state.playerBarFlash = 0f;
+        state.intentTimer = 0f;
+        state.lastEnemyDamage = 0;
+        state.lastResult = "";
+        state.comboPopTimer = 0f;
+        state.comboResetTimer = 0f;
+        state.roundDuration = GameConfig.COMBAT_ROUND_TIMEOUT;
         Profile profile = profileFor(enemy);
         float floorScalar = 1f + Math.max(0, state.floor - 1) * GameConfig.CURSOR_SPEED_SCALING_PER_FLOOR;
         float relicSpeed = relicCursorSpeedMultiplier();
@@ -63,6 +77,7 @@ public class CombatManager {
         state.shakeTimer = 0f;
         state.blockedThisRound = false;
         setupCombatRound(true);
+        notifyGuardChanged();
     }
 
     public void clear() {
@@ -81,8 +96,11 @@ public class CombatManager {
         if (state == null) {
             return;
         }
-        state.roundElapsed += dt;
-        float delta = state.cursorSpeed * dt;
+        float timeScale = state.hitStopTimer > 0f ? 0.2f : 1f;
+        float scaledDt = dt * timeScale;
+        state.hitStopTimer = Math.max(0f, state.hitStopTimer - dt);
+        state.roundElapsed += scaledDt;
+        float delta = state.cursorSpeed * scaledDt;
         if (state.cursorForward) {
             state.cursorPos += delta;
             if (state.cursorPos >= 1f) {
@@ -97,7 +115,8 @@ public class CombatManager {
             }
         }
 
-        if (!state.inputProcessed && state.roundElapsed >= GameConfig.COMBAT_ROUND_TIMEOUT) {
+        if (!state.inputProcessed && state.roundElapsed >= state.roundDuration) {
+            state.lastWasTimeout = true;
             registerCombatMiss(false);
         }
 
@@ -107,9 +126,27 @@ public class CombatManager {
         if (state.shakeTimer > 0f) {
             state.shakeTimer = Math.max(0f, state.shakeTimer - dt);
         }
+        if (state.enemyBarFlash > 0f) {
+            state.enemyBarFlash = Math.max(0f, state.enemyBarFlash - dt);
+        }
+        if (state.playerBarFlash > 0f) {
+            state.playerBarFlash = Math.max(0f, state.playerBarFlash - dt);
+        }
+        if (state.comboPopTimer > 0f) {
+            state.comboPopTimer = Math.max(0f, state.comboPopTimer - dt);
+        }
+        if (state.comboResetTimer > 0f) {
+            state.comboResetTimer = Math.max(0f, state.comboResetTimer - dt);
+        }
+
+        if (state.enemyStrikeScheduled) {
+            state.intentTimer += scaledDt;
+        } else {
+            state.intentTimer = Math.max(0f, state.intentTimer - scaledDt * 0.5f);
+        }
 
         if (state.awaitingEnemyTurn) {
-            state.postInputTimer += dt;
+            state.postInputTimer += scaledDt;
             if (state.postInputTimer >= GameConfig.COMBAT_POST_INPUT_DELAY) {
                 resolveEnemyTurn();
                 if (state == null) {
@@ -125,11 +162,15 @@ public class CombatManager {
         if (state == null || state.inputProcessed) {
             return;
         }
-        CombatSegment segment = findSegmentAt(state.cursorPos);
-        if (segment == null) {
+        SegmentHit hit = findSegmentAt(state.cursorPos);
+        if (hit == null) {
+            state.lastWasTimeout = false;
             registerCombatMiss(true);
             return;
         }
+        CombatSegment segment = hit.segment;
+        state.lastResolvedCursor = hit.resolvedPosition;
+        state.lastWasTimeout = false;
         switch (segment.type) {
             case DANGER:
                 registerCombatMiss(true);
@@ -139,7 +180,7 @@ public class CombatManager {
                 return;
             case HIT:
             case CRIT:
-                resolvePlayerStrike(segment.type);
+                resolvePlayerStrike(segment.type, hit.resolvedPosition);
                 return;
             default:
                 break;
@@ -150,37 +191,56 @@ public class CombatManager {
         state.blockedThisRound = true;
         state.lastStrikeType = SegmentType.BLOCK;
         state.lastDamage = 0;
+        state.lastEnemyDamage = 0;
+        state.lastResult = "BLOCK";
+        state.lastResolvedCursor = state.cursorPos;
+        state.enemyStrikeScheduled = true;
+        state.missStreak = Math.min(GameConfig.COMBAT_SPEED_MISS_CAP, state.missStreak + 1);
+        state.comboResetTimer = Math.max(state.comboResetTimer, 0.25f);
+        state.comboPopTimer = 0f;
+        state.intentTimer = 0f;
         state.inputProcessed = true;
         state.awaitingEnemyTurn = true;
         state.postInputTimer = 0f;
         state.roundElapsed = 0f;
+        state.guardConsumedThisRound = false;
         if (effects != null) {
             effects.onSegmentEffect(segment, SegmentType.BLOCK);
         }
     }
 
-    private void resolvePlayerStrike(SegmentType type) {
+    private void resolvePlayerStrike(SegmentType type, float resolvedCursor) {
         int base = GameConfig.PLAYER_MIN_DAMAGE
                 + rng.nextInt(GameConfig.PLAYER_MAX_DAMAGE - GameConfig.PLAYER_MIN_DAMAGE + 1);
-        int comboTier = state.comboCount / 3;
-        float multiplier = 1f + comboTier * GameConfig.PLAYER_COMBO_STEP;
-        multiplier *= relicDamageMultiplier();
+        state.lastResolvedCursor = resolvedCursor;
+        float multiplier = comboMultiplierFor(state.comboCount) * relicDamageMultiplier();
         if (type == SegmentType.CRIT) {
-            multiplier += 0.5f;
-            multiplier += relicCritBonus();
+            multiplier += 0.5f + relicCritBonus();
         }
         int damage = Math.max(1, Math.round(base * multiplier));
         state.enemy.hp = Math.max(0, state.enemy.hp - damage);
         state.lastDamage = damage;
         state.lastStrikeType = type;
+        state.lastEnemyDamage = 0;
+        state.lastResult = type == SegmentType.CRIT ? "CRIT" : "HIT";
         int comboGain = type == SegmentType.CRIT ? 2 + relicComboBonusOnCrit() : 1 + relicComboBonusOnHit();
-        state.comboCount += Math.max(0, comboGain);
+        state.comboCount = Math.min(999, state.comboCount + Math.max(0, comboGain));
         state.flashTimer = GameConfig.COMBAT_TRACK_FLASH_TIME;
+        state.enemyBarFlash = GameConfig.COMBAT_ENEMY_BAR_FLASH_TIME;
+        state.hitStopTimer = Math.max(state.hitStopTimer, GameConfig.COMBAT_HIT_STOP_DURATION);
+        state.comboPopTimer = 0.3f;
+        state.comboResetTimer = 0f;
+        state.enemyStrikeScheduled = false;
+        state.missStreak = 0;
+        state.guardConsumedThisRound = false;
+        state.blockedThisRound = false;
         if (effects != null) {
-            effects.onStrike(type, state.cursorPos);
+            effects.onStrike(type, resolvedCursor);
         }
         state.inputProcessed = true;
         state.roundElapsed = 0f;
+        state.roundDuration = GameConfig.COMBAT_ROUND_TIMEOUT;
+        state.lastWasTimeout = false;
         if (state.enemy.hp <= 0) {
             state.awaitingEnemyTurn = false;
             grantVictoryRewards();
@@ -197,14 +257,28 @@ public class CombatManager {
         state.comboCount = 0;
         state.lastDamage = 0;
         state.lastStrikeType = SegmentType.DANGER;
+        state.lastResult = fromInput ? "MISS" : "TIMEOUT";
+        state.lastEnemyDamage = 0;
+        state.lastResolvedCursor = state.cursorPos;
         state.blockedThisRound = false;
+        state.enemyStrikeScheduled = true;
+        state.missStreak = Math.min(GameConfig.COMBAT_SPEED_MISS_CAP, state.missStreak + 1);
         state.inputProcessed = true;
         state.awaitingEnemyTurn = true;
         state.postInputTimer = 0f;
         state.roundElapsed = 0f;
+        state.roundDuration = GameConfig.COMBAT_ROUND_TIMEOUT;
+        state.guardConsumedThisRound = false;
+        state.comboResetTimer = Math.max(state.comboResetTimer, 0.35f);
+        state.comboPopTimer = 0f;
+        state.intentTimer = 0f;
         state.flashTimer = 0f;
+        if (!fromInput) {
+            state.lastWasTimeout = true;
+        }
         if (fromInput) {
             state.shakeTimer = GameConfig.COMBAT_SHAKE_TIME;
+            state.lastWasTimeout = false;
         }
     }
 
@@ -220,18 +294,41 @@ public class CombatManager {
             return;
         }
 
-        int damage = state.enemy.minDmg + rng.nextInt(state.enemy.maxDmg - state.enemy.minDmg + 1);
-        if (state.blockedThisRound) {
-            damage = Math.round(damage * GameConfig.BLOCK_DAMAGE_REDUCTION);
-            if (hasBlockNegateRelic()) {
+        int damage = 0;
+        if (state.enemyStrikeScheduled) {
+            damage = state.enemy.minDmg + rng.nextInt(state.enemy.maxDmg - state.enemy.minDmg + 1);
+            if (state.blockedThisRound) {
+                damage = Math.round(damage * GameConfig.BLOCK_DAMAGE_REDUCTION);
+                if (hasBlockNegateRelic()) {
+                    damage = 0;
+                }
+            }
+            if (damage > 0 && state.storedGuardCharges > 0) {
                 damage = 0;
+                state.storedGuardCharges--;
+                state.guardConsumedThisRound = true;
+                notifyGuardChanged();
+            }
+            if (damage > 0) {
+                player.hp = Math.max(0, player.hp - damage);
+                state.shakeTimer = Math.max(state.shakeTimer, GameConfig.COMBAT_SHAKE_TIME * 0.8f);
             }
         }
-        state.blockedThisRound = false;
+        state.enemyStrikeScheduled = false;
+        state.playerBarFlash = damage > 0 ? GameConfig.COMBAT_PLAYER_BAR_FLASH_TIME
+                : (state.blockedThisRound || state.guardConsumedThisRound ? GameConfig.COMBAT_PLAYER_BAR_FLASH_TIME * 0.6f : 0f);
+        state.lastEnemyDamage = damage;
         if (damage > 0) {
-            player.hp = Math.max(0, player.hp - damage);
-            state.shakeTimer = Math.max(state.shakeTimer, GameConfig.COMBAT_SHAKE_TIME * 0.8f);
+            state.lastResult = "ENEMY HIT";
+        } else if (state.guardConsumedThisRound) {
+            state.lastResult = "GUARD";
+        } else if (state.blockedThisRound) {
+            state.lastResult = "BLOCKED";
+        } else if (state.lastResult == null || state.lastResult.isEmpty()) {
+            state.lastResult = "SAFE";
         }
+        state.blockedThisRound = false;
+        state.guardConsumedThisRound = false;
 
         if (player.hp <= 0) {
             notifyDefeat();
@@ -253,18 +350,23 @@ public class CombatManager {
         if (listener != null && state != null) {
             listener.onDefeat();
         }
+        notifyGuardChanged();
         state = null;
     }
 
-    private void setupCombatRound(boolean resetSpeed) {
+    private void notifyGuardChanged() {
+        if (listener != null && state != null) {
+            listener.onGuardChargesChanged(state.storedGuardCharges);
+        }
+    }
+
+    private void setupCombatRound(boolean firstRound) {
         if (state == null) {
             return;
         }
-        if (resetSpeed) {
-            state.cursorSpeed = Math.max(0.2f, state.cursorBaseSpeed);
-        } else {
-            state.cursorSpeed = Math.max(0.2f, state.cursorSpeed * GameConfig.COMBAT_CURSOR_SPEED_GROWTH);
-        }
+        int stacks = firstRound ? 0 : Math.min(GameConfig.COMBAT_SPEED_MISS_CAP, state.missStreak);
+        float speedScalar = (float) Math.pow(GameConfig.COMBAT_CURSOR_SPEED_GROWTH, stacks);
+        state.cursorSpeed = Math.max(0.2f, state.cursorBaseSpeed * speedScalar);
         state.cursorPos = 0f;
         state.cursorForward = true;
         state.roundElapsed = 0f;
@@ -272,8 +374,14 @@ public class CombatManager {
         state.awaitingEnemyTurn = false;
         state.postInputTimer = 0f;
         state.blockedThisRound = false;
+        state.guardConsumedThisRound = false;
+        state.enemyStrikeScheduled = false;
         state.flashTimer = 0f;
         state.shakeTimer = 0f;
+        state.roundDuration = GameConfig.COMBAT_ROUND_TIMEOUT;
+        state.lastWasTimeout = false;
+        state.intentTimer = 0f;
+        state.lastEnemyDamage = 0;
         generateCombatSegments();
     }
 
@@ -437,6 +545,14 @@ public class CombatManager {
         return profile;
     }
 
+    private float comboMultiplierFor(int combo) {
+        int tier = combo / 3;
+        int capped = Math.min(tier, GameConfig.COMBAT_COMBO_TIER_CAP);
+        int overflow = Math.max(0, tier - GameConfig.COMBAT_COMBO_TIER_CAP);
+        float effectiveTier = capped + overflow * GameConfig.COMBAT_COMBO_OVERFLOW_STEP;
+        return 1f + effectiveTier * GameConfig.PLAYER_COMBO_STEP;
+    }
+
     private float relicHitWidthMultiplier() {
         float scale = 1f;
         for (Relic relic : activeRelics()) {
@@ -545,6 +661,7 @@ public class CombatManager {
         }
 
         VictoryReward reward = new VictoryReward(state.shards - shardsBefore, newRelics);
+        notifyGuardChanged();
         notifyVictory(reward);
     }
 
@@ -564,15 +681,26 @@ public class CombatManager {
         float dangerMaxWidth;
     }
 
-    private CombatSegment findSegmentAt(float position) {
+    private SegmentHit findSegmentAt(float position) {
         if (state == null) {
             return null;
         }
+        float grace = Math.min(0.18f, Math.max(0.015f, state.cursorSpeed * GameConfig.COMBAT_INPUT_GRACE));
         for (CombatSegment segment : state.segments) {
-            if (position >= segment.start && position <= segment.end) {
-                return segment;
+            float start = Math.max(0f, segment.start - grace);
+            float end = Math.min(1f, segment.end + grace);
+            if (position >= start && position <= end) {
+                SegmentHit hit = new SegmentHit();
+                hit.segment = segment;
+                hit.resolvedPosition = clamp(position, segment.start, segment.end);
+                return hit;
             }
         }
         return null;
+    }
+
+    private static final class SegmentHit {
+        CombatSegment segment;
+        float resolvedPosition;
     }
 }

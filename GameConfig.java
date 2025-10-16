@@ -72,9 +72,21 @@ public final class GameConfig {
     public static final float COMBAT_TRACK_FLASH_TIME = 0.4f;
     public static final float COMBAT_SHAKE_TIME = 0.3f;
     public static final float COMBAT_SHAKE_MAG = 6f;
+    public static final float COMBAT_INPUT_GRACE = 0.07f;
+    public static final float COMBAT_HIT_STOP_DURATION = 0.09f;
+    public static final float COMBAT_ENEMY_BAR_FLASH_TIME = 0.28f;
+    public static final float COMBAT_PLAYER_BAR_FLASH_TIME = 0.35f;
+    public static final int COMBAT_COMBO_TIER_CAP = 10;
+    public static final float COMBAT_COMBO_OVERFLOW_STEP = 0.25f;
+    public static final int COMBAT_SPEED_MISS_CAP = 5;
 
     public static final int PANEL_WIDTH = GRID_WIDTH * TILE_SIZE;
     public static final int PANEL_HEIGHT = GRID_HEIGHT * TILE_SIZE + HUD_HEIGHT;
+
+    public static final int FOV_RADIUS = 8;
+    public static final float FOV_SEEN_ALPHA = 0.6f;
+    public static final int MINIMAP_SCALE = 4;
+    public static final int MINIMAP_PADDING = 18;
 
     public static final int DECAL_NONE = -1;
     public static final int DECAL_PLUS = 0;

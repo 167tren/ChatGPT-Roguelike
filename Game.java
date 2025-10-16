@@ -33,6 +33,7 @@ public class Game extends JPanel implements Runnable, CombatManager.Listener, Co
     private final Tile[][] map = dungeon.getMap();
     private final float[][] floorShade = dungeon.getFloorShade();
     private final int[][] floorDecals = dungeon.getFloorDecals();
+    private final TileVisibility[][] visibility = dungeon.getVisibility();
     private final List<Enemy> enemies = dungeon.getEnemies();
     private final List<Particle> particles = new ArrayList<>();
     private final List<Particle> combatParticles = new ArrayList<>();
@@ -50,9 +51,12 @@ public class Game extends JPanel implements Runnable, CombatManager.Listener, Co
     private Stairs stairs;
     private boolean showShopOverlay;
     private boolean showRelicOverlay;
+    private boolean showMinimap = true;
+    private boolean showDebugOverlay;
     private float relicToastTimer;
     private String shopMessage = "";
     private float shopMessageTimer;
+    private int storedBlockCharges;
 
     public Game() {
         setPreferredSize(new Dimension(GameConfig.PANEL_WIDTH, GameConfig.PANEL_HEIGHT));
@@ -79,6 +83,9 @@ public class Game extends JPanel implements Runnable, CombatManager.Listener, Co
         floor = 1;
         showShopOverlay = false;
         showRelicOverlay = false;
+        showMinimap = true;
+        showDebugOverlay = false;
+        storedBlockCharges = 0;
         shopMessage = "";
         shopMessageTimer = 0f;
         setSeed(System.nanoTime());
@@ -99,11 +106,18 @@ public class Game extends JPanel implements Runnable, CombatManager.Listener, Co
         dungeon.generate(currentSeed, player, floor);
         sanctuary = dungeon.getSanctuary();
         stairs = dungeon.getStairs();
+        refreshVisibility();
+    }
+
+    private void refreshVisibility() {
+        dungeon.computeVisibility(player.tileX, player.tileY);
     }
 
     private void beginCombat(Enemy enemy) {
-        combatManager.beginCombat(enemy, relics, shards, floor);
+        combatManager.beginCombat(enemy, relics, shards, floor, storedBlockCharges);
         mode = GameMode.COMBAT;
+        showShopOverlay = false;
+        showRelicOverlay = false;
     }
 
     private void initInput() {
@@ -122,6 +136,10 @@ public class Game extends JPanel implements Runnable, CombatManager.Listener, Co
         int keyCode = event.getKeyCode();
         if (keyCode == KeyEvent.VK_Q) {
             System.exit(0);
+            return true;
+        }
+        if (keyCode == KeyEvent.VK_BACK_QUOTE) {
+            showDebugOverlay = !showDebugOverlay;
             return true;
         }
         switch (mode) {
@@ -174,6 +192,10 @@ public class Game extends JPanel implements Runnable, CombatManager.Listener, Co
             }
             return true;
         }
+        if (keyCode == KeyEvent.VK_M) {
+            showMinimap = !showMinimap;
+            return true;
+        }
         if (showShopOverlay) {
             if (keyCode == KeyEvent.VK_1 || keyCode == KeyEvent.VK_NUMPAD1) {
                 purchaseRelicFromShop();
@@ -181,6 +203,10 @@ public class Game extends JPanel implements Runnable, CombatManager.Listener, Co
             }
             if (keyCode == KeyEvent.VK_2 || keyCode == KeyEvent.VK_NUMPAD2) {
                 purchaseHealFromShop();
+                return true;
+            }
+            if (keyCode == KeyEvent.VK_3 || keyCode == KeyEvent.VK_NUMPAD3) {
+                purchaseGuardFromShop();
                 return true;
             }
         }
@@ -300,6 +326,19 @@ public class Game extends JPanel implements Runnable, CombatManager.Listener, Co
         shopMessageTimer = 2f;
     }
 
+    private void purchaseGuardFromShop() {
+        int cost = GameConfig.COST_HEAL;
+        if (shards < cost) {
+            shopMessage = "Need more shards";
+            shopMessageTimer = 2f;
+            return;
+        }
+        shards -= cost;
+        storedBlockCharges++;
+        shopMessage = "Guard charge readied";
+        shopMessageTimer = 2.5f;
+    }
+
     private void descendFloor() {
         floor++;
         showShopOverlay = false;
@@ -308,6 +347,8 @@ public class Game extends JPanel implements Runnable, CombatManager.Listener, Co
         shopMessageTimer = 0f;
         recentRelics.clear();
         relicToastTimer = 0f;
+        int heal = Math.max(1, Math.round(player.maxHp * 0.1f));
+        player.hp = Math.min(player.maxHp, player.hp + heal);
         setSeed(System.nanoTime());
         generateDungeon();
     }
@@ -428,6 +469,7 @@ public class Game extends JPanel implements Runnable, CombatManager.Listener, Co
             player.moving = false;
             player.renderX = player.targetX;
             player.renderY = player.targetY;
+            refreshVisibility();
             if (pendingCombatEnemy != null) {
                 beginCombat(pendingCombatEnemy);
                 pendingCombatEnemy = null;
@@ -470,6 +512,11 @@ public class Game extends JPanel implements Runnable, CombatManager.Listener, Co
         pendingCombatEnemy = null;
         showShopOverlay = false;
         showRelicOverlay = false;
+    }
+
+    @Override
+    public void onGuardChargesChanged(int charges) {
+        storedBlockCharges = Math.max(0, charges);
     }
 
     @Override
@@ -599,22 +646,33 @@ public class Game extends JPanel implements Runnable, CombatManager.Listener, Co
 
         drawVignette(g2);
 
+        if (showMinimap) {
+            drawMinimap(g2);
+        }
+        if (showDebugOverlay) {
+            drawDebugOverlay(g2);
+        }
+
         g2.dispose();
     }
 
     private void drawTiles(Graphics2D g2) {
         for (int x = 0; x < GameConfig.GRID_WIDTH; x++) {
             for (int y = 0; y < GameConfig.GRID_HEIGHT; y++) {
+                TileVisibility vis = visibility[x][y];
+                if (vis == null || vis == TileVisibility.UNSEEN) {
+                    continue;
+                }
                 if (map[x][y] == Tile.WALL) {
-                    drawWallTile(g2, x, y);
+                    drawWallTile(g2, x, y, vis);
                 } else {
-                    drawFloorTile(g2, x, y);
+                    drawFloorTile(g2, x, y, vis);
                 }
             }
         }
     }
 
-    private void drawFloorTile(Graphics2D g2, int x, int y) {
+    private void drawFloorTile(Graphics2D g2, int x, int y, TileVisibility vis) {
         int px = x * GameConfig.TILE_SIZE;
         int py = y * GameConfig.TILE_SIZE;
         float shade = floorShade[x][y];
@@ -659,14 +717,24 @@ public class Game extends JPanel implements Runnable, CombatManager.Listener, Co
             state.restore();
         }
 
-        if (dungeon.isSanctuaryTile(x, y)) {
-            drawSanctuaryMarker(g2, px, py);
-        } else if (dungeon.isStairsTile(x, y)) {
-            drawStairsMarker(g2, px, py);
+        if (vis == TileVisibility.VISIBLE) {
+            if (dungeon.isSanctuaryTile(x, y)) {
+                drawSanctuaryMarker(g2, px, py);
+            } else if (dungeon.isStairsTile(x, y)) {
+                drawStairsMarker(g2, px, py);
+            }
+        }
+
+        if (vis == TileVisibility.SEEN) {
+            CompositeState dim = new CompositeState(g2);
+            g2.setComposite(AlphaComposite.SrcOver.derive(GameConfig.FOV_SEEN_ALPHA));
+            g2.setColor(new Color(8, 10, 16));
+            g2.fillRect(px, py, GameConfig.TILE_SIZE, GameConfig.TILE_SIZE);
+            dim.restore();
         }
     }
 
-    private void drawWallTile(Graphics2D g2, int x, int y) {
+    private void drawWallTile(Graphics2D g2, int x, int y, TileVisibility vis) {
         int px = x * GameConfig.TILE_SIZE;
         int py = y * GameConfig.TILE_SIZE;
         g2.setColor(GameConfig.COLOR_WALL);
@@ -680,6 +748,14 @@ public class Game extends JPanel implements Runnable, CombatManager.Listener, Co
         g2.setColor(darkEdge);
         g2.fillRect(px, py + GameConfig.TILE_SIZE - 1, GameConfig.TILE_SIZE, 1);
         g2.fillRect(px + GameConfig.TILE_SIZE - 1, py, 1, GameConfig.TILE_SIZE);
+
+        if (vis == TileVisibility.SEEN) {
+            CompositeState dim = new CompositeState(g2);
+            g2.setComposite(AlphaComposite.SrcOver.derive(GameConfig.FOV_SEEN_ALPHA));
+            g2.setColor(new Color(6, 7, 11));
+            g2.fillRect(px, py, GameConfig.TILE_SIZE, GameConfig.TILE_SIZE);
+            dim.restore();
+        }
     }
 
     private void drawSanctuaryMarker(Graphics2D g2, int px, int py) {
@@ -724,6 +800,17 @@ public class Game extends JPanel implements Runnable, CombatManager.Listener, Co
 
     private void drawParticles(Graphics2D g2) {
         for (Particle p : particles) {
+            if (!p.screenSpace) {
+                int tileX = (int) Math.floor(p.x / GameConfig.TILE_SIZE);
+                int tileY = (int) Math.floor(p.y / GameConfig.TILE_SIZE);
+                if (!dungeon.isInBounds(tileX, tileY)) {
+                    continue;
+                }
+                TileVisibility vis = visibility[tileX][tileY];
+                if (vis == null || vis == TileVisibility.UNSEEN) {
+                    continue;
+                }
+            }
             float alpha = 1f - (p.life / p.maxLife);
             if (alpha <= 0f) {
                 continue;
@@ -780,8 +867,10 @@ public class Game extends JPanel implements Runnable, CombatManager.Listener, Co
         g2.setFont(infoFont);
         FontMetrics infoMetrics = g2.getFontMetrics();
         String shardLine = "Shards: " + shards;
+        String guardLine = "Guard charges: " + storedBlockCharges;
         g2.setColor(GameConfig.COLOR_TEXT_SECONDARY);
         g2.drawString(shardLine, x + width - 24 - infoMetrics.stringWidth(shardLine), y + 34);
+        g2.drawString(guardLine, x + 24, y + 54);
 
         int optionY = y + 72;
         drawShopOption(g2, x + 24, optionY, "1", "Buy random relic", GameConfig.COST_RELIC,
@@ -790,11 +879,16 @@ public class Game extends JPanel implements Runnable, CombatManager.Listener, Co
         boolean canHeal = shards >= GameConfig.COST_HEAL && player.hp < player.maxHp;
         drawShopOption(g2, x + 24, optionY, "2", "Heal " + GameConfig.SHOP_HEAL_AMOUNT + " HP",
                 GameConfig.COST_HEAL, canHeal);
+        optionY += 48;
+        boolean canGuard = shards >= GameConfig.COST_HEAL;
+        drawShopOption(g2, x + 24, optionY, "3", "Refill guard charge", GameConfig.COST_HEAL, canGuard);
 
         g2.setFont(infoFont);
         g2.setColor(GameConfig.COLOR_TEXT_SECONDARY);
         String closeText = "Press E or Esc to close";
         g2.drawString(closeText, x + width - 24 - infoMetrics.stringWidth(closeText), y + height - 20);
+        String guardHint = "Guard negates the next enemy strike.";
+        g2.drawString(guardHint, x + 24, y + height - 38);
 
         if (shopMessageTimer > 0f && shopMessage != null && !shopMessage.isEmpty()) {
             float alpha = Math.min(1f, shopMessageTimer / 2f);
@@ -915,9 +1009,88 @@ public class Game extends JPanel implements Runnable, CombatManager.Listener, Co
                 y + height / 2 + metrics.getAscent() / 2 - 3);
     }
 
+    private void drawMinimap(Graphics2D g2) {
+        int scale = Math.max(2, GameConfig.MINIMAP_SCALE);
+        int mapWidth = GameConfig.GRID_WIDTH * scale;
+        int mapHeight = GameConfig.GRID_HEIGHT * scale;
+        int padding = GameConfig.MINIMAP_PADDING;
+        int cardWidth = mapWidth + 24;
+        int cardHeight = mapHeight + 32;
+        int x = getWidth() - padding - cardWidth;
+        int y = GameConfig.HUD_HEIGHT + padding;
+
+        CompositeState shadow = new CompositeState(g2);
+        g2.setComposite(AlphaComposite.SrcOver.derive(0.35f));
+        g2.setColor(Color.BLACK);
+        g2.fillRoundRect(x + 6, y + 8, cardWidth, cardHeight, 18, 18);
+        shadow.restore();
+
+        g2.setColor(new Color(18, 22, 30, 235));
+        g2.fillRoundRect(x, y, cardWidth, cardHeight, 18, 18);
+        g2.setColor(new Color(255, 255, 255, 40));
+        g2.setStroke(new BasicStroke(1.4f));
+        g2.drawRoundRect(x, y, cardWidth, cardHeight, 18, 18);
+
+        int labelY = y + 16;
+        Font titleFont = getFont().deriveFont(Font.BOLD, 13f);
+        g2.setFont(titleFont);
+        g2.setColor(GameConfig.COLOR_TEXT_PRIMARY);
+        g2.drawString("Minimap", x + 14, labelY);
+
+        int mapX = x + 12;
+        int mapY = y + 22;
+        for (int tx = 0; tx < GameConfig.GRID_WIDTH; tx++) {
+            for (int ty = 0; ty < GameConfig.GRID_HEIGHT; ty++) {
+                TileVisibility vis = visibility[tx][ty];
+                if (vis == null || vis == TileVisibility.UNSEEN) {
+                    continue;
+                }
+                boolean floorTile = map[tx][ty] == Tile.FLOOR;
+                Color tileColor;
+                if (floorTile) {
+                    tileColor = vis == TileVisibility.VISIBLE ? new Color(72, 86, 108)
+                            : new Color(48, 54, 68);
+                } else {
+                    tileColor = vis == TileVisibility.VISIBLE ? new Color(96, 104, 126)
+                            : new Color(45, 49, 64);
+                }
+                g2.setColor(tileColor);
+                g2.fillRect(mapX + tx * scale, mapY + ty * scale, scale, scale);
+            }
+        }
+
+        g2.setColor(new Color(255, 255, 255, 40));
+        g2.drawRect(mapX, mapY, mapWidth, mapHeight);
+
+        if (sanctuary != null && isTileSeen(sanctuary.tileX, sanctuary.tileY)) {
+            g2.setColor(GameConfig.COLOR_SANCTUARY);
+            g2.fillRect(mapX + sanctuary.tileX * scale, mapY + sanctuary.tileY * scale, scale, scale);
+        }
+        if (stairs != null && isTileSeen(stairs.tileX, stairs.tileY)) {
+            g2.setColor(GameConfig.COLOR_STAIRS);
+            g2.fillRect(mapX + stairs.tileX * scale, mapY + stairs.tileY * scale, scale, scale);
+        }
+
+        g2.setColor(GameConfig.COLOR_PLAYER);
+        g2.fillRect(mapX + player.tileX * scale, mapY + player.tileY * scale, scale, scale);
+
+        g2.setColor(GameConfig.COLOR_SEGMENT_DANGER);
+        for (Enemy enemy : enemies) {
+            if (isTileVisible(enemy.tileX, enemy.tileY)) {
+                g2.fillRect(mapX + enemy.tileX * scale, mapY + enemy.tileY * scale, scale, scale);
+            }
+        }
+    }
+
     private void drawEnemies(Graphics2D g2) {
         CombatState activeCombat = combatManager.getState();
         for (Enemy enemy : enemies) {
+            if (!dungeon.isInBounds(enemy.tileX, enemy.tileY)) {
+                continue;
+            }
+            if (visibility[enemy.tileX][enemy.tileY] != TileVisibility.VISIBLE) {
+                continue;
+            }
             float px = enemy.tileX * GameConfig.TILE_SIZE;
             float py = enemy.tileY * GameConfig.TILE_SIZE;
             float shadowW = GameConfig.TILE_SIZE * 0.7f;
@@ -956,6 +1129,63 @@ public class Game extends JPanel implements Runnable, CombatManager.Listener, Co
                 g2.drawRoundRect(bodyX - 2, bodyY - 2, bodySize + 4, bodySize + 4, bodySize / 3, bodySize / 3);
             }
             g2.setStroke(new BasicStroke(1f));
+        }
+    }
+
+    private void drawDebugOverlay(Graphics2D g2) {
+        Font debugFont = getFont().deriveFont(Font.PLAIN, 12f);
+        g2.setFont(debugFont);
+        FontMetrics fm = g2.getFontMetrics();
+        java.util.List<String> lines = new java.util.ArrayList<>();
+        lines.add(String.format("Mode: %s | Floor: %d | Seed: %d", mode, floor, currentSeed));
+        lines.add(String.format("Player HP: %d/%d | Shards: %d | Guard: %d", player.hp, player.maxHp, shards,
+                storedBlockCharges));
+        if (pendingCombatEnemy != null && mode == GameMode.DUNGEON) {
+            lines.add("Pending encounter: " + pendingCombatEnemy.name);
+        }
+        CombatState state = combatManager.getState();
+        if (state != null) {
+            lines.add(String.format("Enemy: %s %d/%d (Elite:%s)", state.enemy.name, state.enemy.hp, state.enemy.maxHp,
+                    state.enemy.elite));
+            lines.add(String.format("Cursor %.3f dir:%s speed:%.3f base:%.3f", state.cursorPos,
+                    state.cursorForward ? ">" : "<", state.cursorSpeed, state.cursorBaseSpeed));
+            lines.add(String.format("Round %d time %.2fs/%.2fs", state.roundIndex + 1, state.roundElapsed,
+                    state.roundDuration));
+            lines.add(String.format("StrikeScheduled:%s blocked:%s guardConsumed:%s", state.enemyStrikeScheduled,
+                    state.blockedThisRound, state.guardConsumedThisRound));
+            lines.add(String.format("Combo %d (x%.2f) missStreak:%d", state.comboCount,
+                    comboMultiplierForCount(state.comboCount), state.missStreak));
+            lines.add(String.format("Last: %s | playerDmg:%d | enemyDmg:%d | timeout:%s", state.lastResult,
+                    state.lastDamage, state.lastEnemyDamage, state.lastWasTimeout));
+            lines.add(String.format("Timers flashE:%.2f flashP:%.2f intent:%.2f hitStop:%.2f", state.enemyBarFlash,
+                    state.playerBarFlash, state.intentTimer, state.hitStopTimer));
+        }
+
+        int maxWidth = 0;
+        for (String line : lines) {
+            maxWidth = Math.max(maxWidth, fm.stringWidth(line));
+        }
+        int lineHeight = fm.getHeight();
+        int padding = 12;
+        int boxWidth = maxWidth + padding * 2;
+        int boxHeight = lineHeight * lines.size() + padding * 2;
+        int x = GameConfig.MINIMAP_PADDING;
+        int y = GameConfig.HUD_HEIGHT + GameConfig.MINIMAP_PADDING;
+
+        CompositeState composite = new CompositeState(g2);
+        g2.setComposite(AlphaComposite.SrcOver.derive(0.75f));
+        g2.setColor(new Color(10, 14, 22, 220));
+        g2.fillRoundRect(x, y, boxWidth, boxHeight, 16, 16);
+        composite.restore();
+
+        g2.setColor(new Color(255, 255, 255, 40));
+        g2.drawRoundRect(x, y, boxWidth, boxHeight, 16, 16);
+
+        g2.setColor(GameConfig.COLOR_TEXT_PRIMARY);
+        int textY = y + padding + fm.getAscent();
+        for (String line : lines) {
+            g2.drawString(line, x + padding, textY);
+            textY += lineHeight;
         }
     }
 
@@ -1139,7 +1369,7 @@ public class Game extends JPanel implements Runnable, CombatManager.Listener, Co
                     break;
             }
             CompositeState segState = new CompositeState(g2);
-            float alpha = segment.type == SegmentType.DANGER ? 0.8f : 0.9f;
+            float alpha = segment.type == SegmentType.DANGER ? 0.82f : 0.9f;
             g2.setComposite(AlphaComposite.SrcOver.derive(alpha));
             g2.setColor(color);
             g2.fillRoundRect(Math.round(segX), Math.round(segmentY), Math.round(Math.max(segW, 6f)),
@@ -1147,7 +1377,7 @@ public class Game extends JPanel implements Runnable, CombatManager.Listener, Co
             segState.restore();
 
             g2.setStroke(new BasicStroke(1.8f));
-            g2.setColor(lightenColor(color, 0.3f));
+            g2.setColor(lightenColor(color, 0.25f));
             g2.drawRoundRect(Math.round(segX), Math.round(segmentY), Math.round(Math.max(segW, 6f)),
                     Math.round(segmentHeight), 20, 20);
         }
@@ -1162,6 +1392,17 @@ public class Game extends JPanel implements Runnable, CombatManager.Listener, Co
             flashState.restore();
         }
 
+        if (state.lastStrikeType == SegmentType.HIT || state.lastStrikeType == SegmentType.CRIT) {
+            float markerX = trackX + state.lastResolvedCursor * trackWidth;
+            CompositeState markerState = new CompositeState(g2);
+            g2.setComposite(AlphaComposite.SrcOver.derive(0.75f));
+            Color markerColor = state.lastStrikeType == SegmentType.CRIT ? GameConfig.COLOR_SEGMENT_CRIT
+                    : GameConfig.COLOR_SEGMENT_HIT;
+            g2.setColor(markerColor);
+            g2.fillOval(Math.round(markerX - 6f), Math.round(trackY + trackHeight / 2f - 6f), 12, 12);
+            markerState.restore();
+        }
+
         float cursorWidth = 10f;
         float cursorHeight = trackHeight - 12f;
         float cursorX = trackX + state.cursorPos * trackWidth - cursorWidth / 2f;
@@ -1174,6 +1415,22 @@ public class Game extends JPanel implements Runnable, CombatManager.Listener, Co
         g2.drawRoundRect(Math.round(cursorX), Math.round(cursorY), Math.round(cursorWidth), Math.round(cursorHeight),
                 14, 14);
 
+        Font baseFont = getFont();
+
+        if (state.enemyStrikeScheduled) {
+            Font intentFont = baseFont.deriveFont(Font.BOLD, 16f);
+            g2.setFont(intentFont);
+            String intent = "ENEMY STRIKE INCOMING";
+            float pulse = (float) (0.55f + 0.45f * Math.sin(state.intentTimer * 6f));
+            int alpha = Math.min(255, Math.round(200 * pulse));
+            Color danger = GameConfig.COLOR_SEGMENT_DANGER;
+            Color intentColor = new Color(danger.getRed(), danger.getGreen(), danger.getBlue(), alpha);
+            g2.setColor(intentColor);
+            FontMetrics intentMetrics = g2.getFontMetrics();
+            g2.drawString(intent, Math.round(trackX + (trackWidth - intentMetrics.stringWidth(intent)) / 2f),
+                    Math.round(trackY - 18f));
+        }
+
         float comboBarWidth = trackWidth;
         float comboBarHeight = 8f;
         float comboBarX = trackX;
@@ -1181,16 +1438,15 @@ public class Game extends JPanel implements Runnable, CombatManager.Listener, Co
         g2.setColor(new Color(24, 27, 36));
         g2.fillRoundRect(Math.round(comboBarX), Math.round(comboBarY), Math.round(comboBarWidth),
                 Math.round(comboBarHeight), 12, 12);
-        float comboProgress = Math.min(1f, state.comboVisual / 12f);
+        float comboProgress = Math.min(1f,
+                state.comboVisual / Math.max(1f, GameConfig.COMBAT_COMBO_TIER_CAP * 3f));
         if (comboProgress > 0f) {
             g2.setColor(GameConfig.COLOR_ACCENT);
             g2.fillRoundRect(Math.round(comboBarX), Math.round(comboBarY), Math.round(comboBarWidth * comboProgress),
                     Math.round(comboBarHeight), 12, 12);
         }
 
-        Font baseFont = g2.getFont();
-        float comboDifference = Math.max(0f, state.comboCount - state.comboVisual);
-        float comboScale = 1f + Math.min(0.35f, comboDifference * 0.12f);
+        float comboScale = 1f + Math.max(0f, state.comboPopTimer / 0.3f) * 0.35f;
         Font comboFont = baseFont.deriveFont(Font.BOLD, 18f * comboScale);
         g2.setFont(comboFont);
         String comboText = "COMBO x" + state.comboCount;
@@ -1199,34 +1455,62 @@ public class Game extends JPanel implements Runnable, CombatManager.Listener, Co
         g2.drawString(comboText, Math.round(trackX + (trackWidth - comboMetrics.stringWidth(comboText)) / 2f),
                 Math.round(comboBarY - 8f));
 
+        g2.setFont(baseFont.deriveFont(Font.PLAIN, 12f));
+        float comboMultiplier = comboMultiplierForCount(state.comboCount);
+        String comboMultText = String.format("x%.2f dmg", comboMultiplier);
+        FontMetrics multMetrics = g2.getFontMetrics();
+        g2.setColor(new Color(180, 189, 205));
+        g2.drawString(comboMultText, Math.round(trackX + (trackWidth - multMetrics.stringWidth(comboMultText)) / 2f),
+                Math.round(comboBarY - 22f));
+
         g2.setFont(baseFont.deriveFont(Font.PLAIN, 14f));
         String statusText;
-        Color statusColor = GameConfig.COLOR_TEXT_SECONDARY;
-        if (state.lastStrikeType == null) {
-            statusText = "Ready your strike";
-        } else {
-            switch (state.lastStrikeType) {
-                case CRIT:
-                    statusText = "Critical hit! " + state.lastDamage + " dmg";
-                    statusColor = GameConfig.COLOR_SEGMENT_CRIT;
-                    break;
-                case HIT:
-                    statusText = "Hit for " + state.lastDamage + " dmg";
-                    statusColor = GameConfig.COLOR_SEGMENT_HIT;
-                    break;
-                case BLOCK:
-                    statusText = "Guarded the blow";
-                    statusColor = GameConfig.COLOR_SEGMENT_BLOCK;
-                    break;
-                case DANGER:
-                default:
-                    statusText = "Miss! Combo broken";
-                    statusColor = GameConfig.COLOR_SEGMENT_DANGER;
-                    break;
-            }
+        Color statusColor;
+        switch (state.lastResult != null ? state.lastResult : "") {
+            case "CRIT":
+                statusText = "Critical! +" + state.lastDamage + " dmg";
+                statusColor = GameConfig.COLOR_SEGMENT_CRIT;
+                break;
+            case "HIT":
+                statusText = "Hit for " + state.lastDamage + " dmg";
+                statusColor = GameConfig.COLOR_SEGMENT_HIT;
+                break;
+            case "BLOCK":
+                statusText = "Guarded the strike";
+                statusColor = GameConfig.COLOR_SEGMENT_BLOCK;
+                break;
+            case "MISS":
+                statusText = "Missed! Enemy will strike";
+                statusColor = GameConfig.COLOR_SEGMENT_DANGER;
+                break;
+            case "TIMEOUT":
+                statusText = "Too slow – enemy retaliates";
+                statusColor = GameConfig.COLOR_SEGMENT_DANGER;
+                break;
+            case "ENEMY HIT":
+                statusText = "You took " + state.lastEnemyDamage + " dmg";
+                statusColor = GameConfig.COLOR_SEGMENT_DANGER;
+                break;
+            case "BLOCKED":
+                statusText = "Block absorbed the hit";
+                statusColor = GameConfig.COLOR_SEGMENT_BLOCK;
+                break;
+            case "GUARD":
+                statusText = "Stored guard negated the strike";
+                statusColor = GameConfig.COLOR_ACCENT;
+                break;
+            case "SAFE":
+                statusText = "Safe for now – press your advantage";
+                statusColor = GameConfig.COLOR_TEXT_SECONDARY;
+                break;
+            default:
+                statusText = "Ready your strike";
+                statusColor = GameConfig.COLOR_TEXT_SECONDARY;
+                break;
         }
         g2.setColor(statusColor);
-        g2.drawString(statusText, Math.round(trackX + (trackWidth - g2.getFontMetrics().stringWidth(statusText)) / 2f),
+        FontMetrics statusMetrics = g2.getFontMetrics();
+        g2.drawString(statusText, Math.round(trackX + (trackWidth - statusMetrics.stringWidth(statusText)) / 2f),
                 Math.round(trackY + trackHeight + 28f));
 
         float infoPadding = 32f;
@@ -1234,9 +1518,18 @@ public class Game extends JPanel implements Runnable, CombatManager.Listener, Co
         float enemyBarY = panelY + infoPadding;
         float playerBarY = enemyBarY + 36f;
         drawLabeledBar(g2, panelX + infoPadding, enemyBarY, barWidth, 18f,
-                state.enemy.name + " HP", state.enemy.hp, state.enemy.maxHp, GameConfig.COLOR_SEGMENT_DANGER);
+                state.enemy.name + " HP", state.enemy.hp, state.enemy.maxHp, GameConfig.COLOR_SEGMENT_DANGER,
+                state.enemyBarFlash);
         drawLabeledBar(g2, panelX + infoPadding, playerBarY, barWidth, 18f,
-                "Player HP", player.hp, player.maxHp, GameConfig.COLOR_ACCENT);
+                "Player HP", player.hp, player.maxHp, GameConfig.COLOR_ACCENT, state.playerBarFlash);
+
+        g2.setFont(baseFont.deriveFont(Font.PLAIN, 12f));
+        g2.setColor(GameConfig.COLOR_TEXT_SECONDARY);
+        String guardLabel = "Stored guard: " + storedBlockCharges;
+        FontMetrics guardMetrics = g2.getFontMetrics();
+        g2.drawString(guardLabel,
+                Math.round(panelX + infoPadding + barWidth - guardMetrics.stringWidth(guardLabel)),
+                Math.round(playerBarY + 30f));
 
         float portraitSize = Math.min(110f, panelHeight - 92f);
         float portraitX = panelX + 36f;
@@ -1278,7 +1571,7 @@ public class Game extends JPanel implements Runnable, CombatManager.Listener, Co
         }
 
         g2.setFont(baseFont.deriveFont(Font.PLAIN, 13f));
-        String hint = "SPACE/ENTER on yellow/green • Avoid red • Hit blue to block • Build combo";
+        String hint = "Space/Enter on yellow or green • Avoid red • Blue blocks brace you • Build combo for damage";
         FontMetrics hintMetrics = g2.getFontMetrics();
         g2.setColor(GameConfig.COLOR_TEXT_SECONDARY);
         g2.drawString(hint, Math.round(panelX + (panelWidth - hintMetrics.stringWidth(hint)) / 2f),
@@ -1286,7 +1579,7 @@ public class Game extends JPanel implements Runnable, CombatManager.Listener, Co
     }
 
     private void drawLabeledBar(Graphics2D g2, float x, float y, float width, float height, String label, int value,
-            int max, Color fillColor) {
+            int max, Color fillColor, float flash) {
         Font baseFont = g2.getFont();
         g2.setFont(baseFont.deriveFont(Font.PLAIN, 13f));
         g2.setColor(GameConfig.COLOR_TEXT_SECONDARY);
@@ -1301,6 +1594,15 @@ public class Game extends JPanel implements Runnable, CombatManager.Listener, Co
         float pct = max <= 0 ? 0f : Math.max(0f, Math.min(1f, value / (float) max));
         g2.setColor(fillColor);
         g2.fillRoundRect(Math.round(x), Math.round(y), Math.round(width * pct), Math.round(height), 16, 16);
+
+        if (flash > 0f) {
+            CompositeState flashState = new CompositeState(g2);
+            float flashAlpha = Math.min(1f, flash / 0.35f);
+            g2.setComposite(AlphaComposite.SrcOver.derive(flashAlpha * 0.4f));
+            g2.setColor(Color.WHITE);
+            g2.fillRoundRect(Math.round(x), Math.round(y), Math.round(width), Math.round(height), 16, 16);
+            flashState.restore();
+        }
 
         g2.setStroke(new BasicStroke(1.5f));
         g2.setColor(new Color(255, 255, 255, 50));
@@ -1341,25 +1643,30 @@ public class Game extends JPanel implements Runnable, CombatManager.Listener, Co
         FontMetrics pillMetrics = g2.getFontMetrics();
 
         String hpText = "HP " + player.hp + "/" + player.maxHp;
-        String stageText = "Stage 4 — Floor " + floor;
+        String stageText = "Stage 5 — Floor " + floor;
         String shardText = "Shards " + shards;
+        String guardText = "Guard " + storedBlockCharges;
         String seedText = "Seed: " + currentSeed;
 
         int hpWidth = pillWidth(pillMetrics, hpText);
         int stageWidth = pillWidth(pillMetrics, stageText);
         int shardWidth = pillWidth(pillMetrics, shardText);
+        int guardWidth = pillWidth(pillMetrics, guardText);
         int seedWidth = pillWidth(pillMetrics, seedText);
 
         int hpX = padding;
         int seedX = width - padding - seedWidth;
-        int shardX = seedX - shardWidth - 12;
+        int guardX = seedX - guardWidth - 12;
+        int shardX = guardX - shardWidth - 12;
         if (shardX < hpX + hpWidth + 8) {
             shardX = hpX + hpWidth + 8;
-            seedX = Math.max(seedX, shardX + shardWidth + 12);
+            guardX = shardX + shardWidth + 12;
+            seedX = guardX + guardWidth + 12;
         }
         int stageX = Math.max(padding + hpWidth + 8, (width - stageWidth) / 2);
-        if (stageX + stageWidth > shardX - 8) {
-            stageX = shardX - stageWidth - 8;
+        int rightMostLeft = Math.min(shardX, guardX);
+        if (stageX + stageWidth > rightMostLeft - 8) {
+            stageX = rightMostLeft - stageWidth - 8;
         }
         stageX = Math.max(stageX, hpX + hpWidth + 8);
 
@@ -1369,16 +1676,37 @@ public class Game extends JPanel implements Runnable, CombatManager.Listener, Co
                 GameConfig.COLOR_TEXT_PRIMARY, pillMetrics);
         drawHudPill(g2, shardX, 16, shardWidth, pillHeight, pillArc, shardText, new Color(0x1A1E27),
                 GameConfig.COLOR_TEXT_PRIMARY, pillMetrics);
+        drawHudPill(g2, guardX, 16, guardWidth, pillHeight, pillArc, guardText, new Color(0x18202B),
+                GameConfig.COLOR_TEXT_PRIMARY, pillMetrics);
         drawHudPill(g2, seedX, 16, seedWidth, pillHeight, pillArc, seedText, new Color(0x151922),
                 GameConfig.COLOR_TEXT_SECONDARY, pillMetrics);
 
         drawRelicChips(g2, padding, GameConfig.HUD_HEIGHT - 30, width - padding * 2);
 
+        Font infoFont = getFont().deriveFont(Font.PLAIN, 12f);
+        g2.setFont(infoFont);
+        FontMetrics infoMetrics = g2.getFontMetrics();
+        String minimapHint = "Minimap [M]";
+        int minimapX = width - padding - infoMetrics.stringWidth(minimapHint);
+        int minimapY = 36;
+        g2.setColor(GameConfig.COLOR_TEXT_SECONDARY);
+        g2.drawString(minimapHint, minimapX, minimapY);
+
+        String fovLabel = "FOV";
+        int fovX = minimapX;
+        int fovY = minimapY + infoMetrics.getHeight();
+        g2.drawString(fovLabel, fovX, fovY);
+        int dotSize = 6;
+        int dotX = fovX + infoMetrics.stringWidth(fovLabel) + 6;
+        int dotY = fovY - infoMetrics.getAscent() / 2 - dotSize / 2;
+        g2.setColor(GameConfig.COLOR_ACCENT);
+        g2.fillOval(dotX, dotY, dotSize, dotSize);
+
         Font controlsFont = getFont().deriveFont(Font.PLAIN, 12.5f);
         g2.setFont(controlsFont);
         g2.setColor(GameConfig.COLOR_TEXT_SECONDARY);
-        String controls = "Move: WASD/Arrows  •  Interact: E  •  Shop: 1/2  •  Relics: R  •  Descend: E on stairs"
-                + "  •  Reroll: N  •  Reseed: Ctrl+S  •  Reload: F5  •  Quit: Q";
+        String controls = "Move: WASD/Arrows • Interact: E • Shop: 1/2/3 • Relics: R • Minimap: M • Debug: ~"
+                + " • Reroll: N • Demo: Ctrl+S • Reload: F5 • Quit: Q";
         FontMetrics controlsMetrics = g2.getFontMetrics();
         int controlsY = GameConfig.HUD_HEIGHT - 10;
         g2.drawString(controls, Math.max(padding, (width - controlsMetrics.stringWidth(controls)) / 2), controlsY);
@@ -1475,6 +1803,14 @@ public class Game extends JPanel implements Runnable, CombatManager.Listener, Co
         return false;
     }
 
+    private float comboMultiplierForCount(int comboCount) {
+        int tier = comboCount / 3;
+        int capped = Math.min(tier, GameConfig.COMBAT_COMBO_TIER_CAP);
+        int overflow = Math.max(0, tier - GameConfig.COMBAT_COMBO_TIER_CAP);
+        float effectiveTier = capped + overflow * GameConfig.COMBAT_COMBO_OVERFLOW_STEP;
+        return 1f + effectiveTier * GameConfig.PLAYER_COMBO_STEP;
+    }
+
     private void drawVignette(Graphics2D g2) {
         int width = getWidth();
         int height = getHeight();
@@ -1490,6 +1826,14 @@ public class Game extends JPanel implements Runnable, CombatManager.Listener, Co
         g2.fillRect(0, 0, width, height);
         compositeState.restore();
         paintState.restore();
+    }
+
+    private boolean isTileVisible(int x, int y) {
+        return dungeon.isInBounds(x, y) && visibility[x][y] == TileVisibility.VISIBLE;
+    }
+
+    private boolean isTileSeen(int x, int y) {
+        return dungeon.isInBounds(x, y) && visibility[x][y] != TileVisibility.UNSEEN;
     }
 
     private long tileHash(long seed, int x, int y) {
@@ -1562,7 +1906,7 @@ public class Game extends JPanel implements Runnable, CombatManager.Listener, Co
 
     public static void main(String[] args) {
         SwingUtilities.invokeLater(() -> {
-            JFrame frame = new JFrame("Roguelike — Stage 4 (Relics, Elites, and Floors)");
+        JFrame frame = new JFrame("Roguelike — Stage 5 (FOV, Minimap, and Combat Polish)");
             Game game = new Game();
             frame.setDefaultCloseOperation(JFrame.EXIT_ON_CLOSE);
             frame.setResizable(false);

@@ -6,6 +6,7 @@ public class Dungeon {
     private final Tile[][] map = new Tile[GameConfig.GRID_WIDTH][GameConfig.GRID_HEIGHT];
     private final float[][] floorShade = new float[GameConfig.GRID_WIDTH][GameConfig.GRID_HEIGHT];
     private final int[][] floorDecals = new int[GameConfig.GRID_WIDTH][GameConfig.GRID_HEIGHT];
+    private final TileVisibility[][] visibility = new TileVisibility[GameConfig.GRID_WIDTH][GameConfig.GRID_HEIGHT];
     private final List<Rect> rooms = new ArrayList<>();
     private final List<Enemy> enemies = new ArrayList<>();
     private final Random rng;
@@ -75,6 +76,7 @@ public class Dungeon {
         placeSanctuary(start);
         placeStairs(start);
         spawnEnemies(player, start);
+        computeVisibility(player.tileX, player.tileY);
     }
 
     public Tile[][] getMap() {
@@ -87,6 +89,10 @@ public class Dungeon {
 
     public int[][] getFloorDecals() {
         return floorDecals;
+    }
+
+    public TileVisibility[][] getVisibility() {
+        return visibility;
     }
 
     public List<Rect> getRooms() {
@@ -134,6 +140,42 @@ public class Dungeon {
         enemies.remove(enemy);
     }
 
+    public void computeVisibility(int originX, int originY) {
+        for (int x = 0; x < GameConfig.GRID_WIDTH; x++) {
+            for (int y = 0; y < GameConfig.GRID_HEIGHT; y++) {
+                if (visibility[x][y] == TileVisibility.VISIBLE) {
+                    visibility[x][y] = TileVisibility.SEEN;
+                }
+            }
+        }
+
+        int radius = GameConfig.FOV_RADIUS;
+        int radiusSq = radius * radius;
+        for (int dx = -radius; dx <= radius; dx++) {
+            for (int dy = -radius; dy <= radius; dy++) {
+                int tx = originX + dx;
+                int ty = originY + dy;
+                if (!inBounds(tx, ty)) {
+                    continue;
+                }
+                if (dx * dx + dy * dy > radiusSq) {
+                    continue;
+                }
+                if (hasLineOfSight(originX, originY, tx, ty)) {
+                    visibility[tx][ty] = TileVisibility.VISIBLE;
+                }
+            }
+        }
+
+        if (inBounds(originX, originY)) {
+            visibility[originX][originY] = TileVisibility.VISIBLE;
+        }
+    }
+
+    public boolean isInBounds(int x, int y) {
+        return inBounds(x, y);
+    }
+
     private void resetPlayer(Entity player) {
         player.moving = false;
         player.moveTime = 0f;
@@ -145,6 +187,7 @@ public class Dungeon {
                 map[x][y] = Tile.WALL;
                 floorShade[x][y] = 1f;
                 floorDecals[x][y] = GameConfig.DECAL_NONE;
+                visibility[x][y] = TileVisibility.UNSEEN;
             }
         }
     }
@@ -199,6 +242,37 @@ public class Dungeon {
         } else {
             floorDecals[x][y] = GameConfig.DECAL_NONE;
         }
+    }
+
+    private boolean hasLineOfSight(int x0, int y0, int x1, int y1) {
+        int dx = Math.abs(x1 - x0);
+        int dy = Math.abs(y1 - y0);
+        int sx = Integer.compare(x1, x0);
+        int sy = Integer.compare(y1, y0);
+        int err = dx - dy;
+        int x = x0;
+        int y = y0;
+
+        while (x != x1 || y != y1) {
+            if (!(x == x0 && y == y0)) {
+                if (!inBounds(x, y)) {
+                    return false;
+                }
+                if (map[x][y] == Tile.WALL && !(x == x1 && y == y1)) {
+                    return false;
+                }
+            }
+            int e2 = err * 2;
+            if (e2 > -dy) {
+                err -= dy;
+                x += sx;
+            }
+            if (e2 < dx) {
+                err += dx;
+                y += sy;
+            }
+        }
+        return true;
     }
 
     private boolean inBounds(int x, int y) {
